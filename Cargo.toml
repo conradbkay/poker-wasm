@@ -1,0 +1,25 @@
+[package]
+name = "poker-wasm"
+version = "0.1.0"
+authors = ["Conrad Kay"]
+repository = "https://github.com/conradkay/power-range-rs"
+description = "WASM range vs range equity for NLHE"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lazy_static = "1.5.0"
+wasm-bindgen = "0.2.100"
+
+[profile.release]
+debug = true
+
+[dev-dependencies]
+rand = "0.9.1"
+criterion = { version = "0.6", features = ["html_reports"] }
+
+[[bench]]
+name = "equity_bench"
+harness = false
