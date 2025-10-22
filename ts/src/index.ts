@@ -1,4 +1,4 @@
-import rvr from "../../pkg/rvr.js"
+import rvr from "../../pkg/poker_wasm.js"
 import fs from "fs"
 import path from "path"
 import { formatCards } from "poker-utils"
