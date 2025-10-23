@@ -182,9 +182,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26145e563e54f2cadc477553f1ec5ee650b00862f0a58bcd12cbdc5f0ea2d2f4"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -306,9 +308,10 @@ dependencies = [
 
 [[package]]
 name = "poker-wasm"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "criterion",
+ "getrandom",
  "lazy_static",
  "rand",
  "wasm-bindgen",

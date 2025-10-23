@@ -1,6 +1,6 @@
 [package]
 name = "poker-wasm"
-version = "0.1.0"
+version = "1.1.2"
 authors = ["Conrad Kay"]
 repository = "https://github.com/conradkay/power-range-rs"
 description = "WASM range vs range equity for NLHE"
@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 lazy_static = "1.5.0"
 wasm-bindgen = "0.2.100"
+rand = "0.9.1"
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [profile.release]
 debug = true

@@ -1,10 +1,10 @@
-import rvr from "../../pkg/poker_wasm.js"
+import { HoldemRange, EquityCalculator } from "../../pkg/poker_wasm.js"
 import fs from "fs"
 import path from "path"
 import { formatCards } from "poker-utils"
 
 function createRandomRange(board: number[], numIterations: number) {
-  const range = new rvr.HoldemRange()
+  const range = new HoldemRange()
   for (let i = 0; i < numIterations; i++) {
     let card1 = Math.floor(Math.random() * 52)
     let card2 = Math.floor(Math.random() * 52)
@@ -31,12 +31,13 @@ function createRandomRange(board: number[], numIterations: number) {
 
 async function main() {
   try {
+    // No initialization needed with nodejs target - WASM loads automatically!
     const handRanksPath = path.join(__dirname, "..", "..", "HandRanks.dat")
     const handRanksData = fs.readFileSync(handRanksPath)
 
-    const calculator = new rvr.EquityCalculator(handRanksData)
+    const calculator = new EquityCalculator(handRanksData)
 
-    const board = [0, 1, 2, 3, 4]
+    const board = [0, 6, 12, 19, 43]
     const vsRange = createRandomRange(board, 100000)
     const myRange = createRandomRange(board, 100000)
 
@@ -57,17 +58,18 @@ async function main() {
         equityResults.length
       } results on board ${formatCards(board)}`
     )
-
-    equityResults.slice(0, 50).forEach((result, i) => {
-      const equity = result.equity
-      console.log(
-        `Result ${i}: Hand ${formatCards(
-          Array.from(result.combo)
-        )} - Win: ${equity.win.toFixed(3)}, Tie: ${equity.tie.toFixed(
-          3
-        )}, Lose: ${equity.lose.toFixed(3)}`
-      )
-    })
+    ;[...equityResults.slice(0, 40), ...equityResults.slice(-40)].forEach(
+      (result, i) => {
+        const equity = result.equity
+        console.log(
+          `Result ${i}: Hand ${formatCards(
+            Array.from(result.combo)
+          )} - Win: ${equity.win.toFixed(3)}, Tie: ${equity.tie.toFixed(
+            3
+          )}, Lose: ${equity.lose.toFixed(3)}`
+        )
+      }
+    )
   } catch (error) {
     console.error("An error occurred during the test run:", error)
   }
