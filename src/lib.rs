@@ -16,6 +16,9 @@ pub use types::*;
 #[wasm_bindgen]
 pub struct EquityCalculator {
     hand_ranks_data: Vec<u8>,
+    cached_hero_range: Option<HoldemRange>,
+    cached_vs_range: Option<HoldemRange>,
+    cached_omaha_range: Option<OmahaRange>,
 }
 
 #[wasm_bindgen]
@@ -24,18 +27,46 @@ impl EquityCalculator {
     pub fn new(data: Vec<u8>) -> Self {
         EquityCalculator {
             hand_ranks_data: data,
+            cached_hero_range: None,
+            cached_vs_range: None,
+            cached_omaha_range: None,
         }
+    }
+
+    /// Set the cached hero range for Holdem calculations
+    /// Call this once before using cached methods to avoid repeated memory transfers
+    #[wasm_bindgen(js_name = setHeroRange)]
+    pub fn set_hero_range(&mut self, range: HoldemRange) {
+        self.cached_hero_range = Some(range);
+    }
+
+    /// Set the cached villain range for Holdem calculations
+    /// Call this once before using cached methods to avoid repeated memory transfers
+    #[wasm_bindgen(js_name = setVsRange)]
+    pub fn set_vs_range(&mut self, range: HoldemRange) {
+        self.cached_vs_range = Some(range);
+    }
+
+    /// Set the cached Omaha range for Omaha calculations
+    /// Call this once before using cached methods to avoid repeated memory transfers
+    #[wasm_bindgen(js_name = setOmahaRange)]
+    pub fn set_omaha_range(&mut self, range: OmahaRange) {
+        self.cached_omaha_range = Some(range);
     }
 
     /// Calculate equity for each hand in hero_range vs vs_range
     /// Enumerates all possible runouts for incomplete boards (3 or 4 cards)
+    /// IMPORTANT: Call setHeroRange and setVsRange before using this method
     #[wasm_bindgen]
     pub fn equity_vs_range(
         &self,
-        hero_range: &HoldemRange,
-        vs_range: &HoldemRange,
         board: &[u8],
     ) -> Result<Vec<EquityResult>, String> {
+        let hero_range = self.cached_hero_range.as_ref()
+            .ok_or("No hero range set. Call setHeroRange first.")?;
+        let vs_range = self.cached_vs_range.as_ref()
+            .ok_or("No villain range set. Call setVsRange first.")?;
+
         equity::holdem::calculate_equity_vs_range(
             &self.hand_ranks_data,
             hero_range,
@@ -45,30 +76,37 @@ impl EquityCalculator {
     }
 
     /// Calculate leaf equity (5-card board only, no enumeration)
+    /// IMPORTANT: Call setHeroRange and setVsRange before using this method
     #[wasm_bindgen]
     pub fn leaf_equity_vs_range(
         &self,
-        hero_range: &HoldemRange,
-        vs_range: &HoldemRange,
         board: &[u8],
-    ) -> Vec<EquityResult> {
-        equity::holdem::calculate_leaf_equity(
+    ) -> Result<Vec<EquityResult>, String> {
+        let hero_range = self.cached_hero_range.as_ref()
+            .ok_or("No hero range set. Call setHeroRange first.")?;
+        let vs_range = self.cached_vs_range.as_ref()
+            .ok_or("No villain range set. Call setVsRange first.")?;
+
+        Ok(equity::holdem::calculate_leaf_equity(
             &self.hand_ranks_data,
             hero_range,
             vs_range,
             board
-        )
+        ))
     }
 
     /// Calculate Omaha equity for a single hand vs a range
     /// Returns equity for each possible runout
+    /// IMPORTANT: Call setOmahaRange before using this method
     #[wasm_bindgen(js_name = omahaEquityVsRange)]
     pub fn omaha_equity_vs_range(
         &self,
         hero_hand: &[u8],
-        vs_range: &OmahaRange,
         board: &[u8],
     ) -> Result<Vec<RunoutEquities>, String> {
+        let vs_range = self.cached_omaha_range.as_ref()
+            .ok_or("No Omaha range set. Call setOmahaRange first.")?;
+
         equity::omaha::calculate_omaha_equity_vs_range(
             &self.hand_ranks_data,
             hero_hand,
@@ -80,13 +118,16 @@ impl EquityCalculator {
     /// Calculate Omaha leaf equity (5-card board only, no enumeration)
     /// hero_hand must be exactly 4 cards
     /// board must be exactly 5 cards
+    /// IMPORTANT: Call setOmahaRange before using this method
     #[wasm_bindgen(js_name = omahaLeafEquityVsRange)]
     pub fn omaha_leaf_equity_vs_range(
         &self,
         hero_hand: &[u8],
-        vs_range: &OmahaRange,
         board: &[u8],
     ) -> Result<RunoutEquities, String> {
+        let vs_range = self.cached_omaha_range.as_ref()
+            .ok_or("No Omaha range set. Call setOmahaRange first.")?;
+
         if hero_hand.len() != 4 {
             return Err("Hero hand must be exactly 4 cards".to_string());
         }
@@ -109,14 +150,17 @@ impl EquityCalculator {
     /// hero_hand must be exactly 4 cards
     /// flop must be exactly 3 cards
     /// num_runouts controls accuracy vs speed tradeoff
+    /// IMPORTANT: Call setOmahaRange before using this method
     #[wasm_bindgen(js_name = omahaMonteCarloFlop)]
     pub fn omaha_monte_carlo_flop(
         &self,
         hero_hand: &[u8],
-        vs_range: &OmahaRange,
         flop: &[u8],
         num_runouts: usize,
     ) -> Result<Vec<RunoutEquities>, String> {
+        let vs_range = self.cached_omaha_range.as_ref()
+            .ok_or("No Omaha range set. Call setOmahaRange first.")?;
+
         if hero_hand.len() != 4 {
             return Err("Hero hand must be exactly 4 cards".to_string());
         }

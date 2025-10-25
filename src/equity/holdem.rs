@@ -3,6 +3,51 @@ use super::blocker::ComboInfo;
 
 use crate::{Equity, EquityResult, HoldemRange};
 
+pub fn hand_leaf_equity_vs_range(
+    hand_ranks_data: &[u8],
+    hand: &[u8; 2],
+    vs_range: &HoldemRange,
+    board: &[u8],
+) -> Equity {
+    assert!(board.len() >= 3 && board.len() <= 5, "board must be 3-5 cards");
+
+    let board_eval = gen_board_eval(hand_ranks_data, board);
+
+    let mut board_mask = 0u64;
+    for &card in board {
+        board_mask |= 1u64 << card;
+    }
+
+    let hero_rank = board_eval(hand);
+
+    // iterate villain's range
+    let mut win_weight = 0.0;
+    let mut tie_weight = 0.0;
+    let mut lose_weight = 0.0;
+    vs_range.for_each_weighted(|weight, idx| {
+        let combo = HoldemRange::from_hand_idx(idx);
+        if (board_mask & (1u64 << combo[0]) != 0) || (board_mask & (1u64 << combo[1]) != 0) {
+            return;
+        }
+
+        let villain_rank = board_eval(&combo);
+
+        if hero_rank > villain_rank {
+            win_weight += weight;
+        } else if hero_rank == villain_rank {
+            tie_weight += weight;
+        } else {
+            lose_weight += weight;
+        }
+    });
+
+    Equity {
+        win: win_weight,
+        tie: tie_weight,
+        lose: lose_weight,
+    }
+}
+
 pub fn calculate_leaf_equity(
     hand_ranks_data: &[u8],
     hero_range: &HoldemRange,

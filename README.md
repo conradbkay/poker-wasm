@@ -44,9 +44,13 @@ heroRange.set_hand(new Uint8Array([47, 46]), 1.0); // KK with 100% weight
 vsRange.set_hand(new Uint8Array([43, 42]), 1.0); // QQ
 vsRange.set_hand(new Uint8Array([39, 38]), 1.0); // JJ
 
+// Set ranges once (avoids repeated memory transfers)
+calculator.setHeroRange(heroRange);
+calculator.setVsRange(vsRange);
+
 // Calculate equity on a flop
 const board = new Uint8Array([0, 12, 28]);
-const results = calculator.equity_vs_range(heroRange, vsRange, board);
+const results = calculator.equity_vs_range(board);
 
 // Results contain equity for each hand in hero's range
 results.forEach(result => {
@@ -77,6 +81,9 @@ const omahaRange = new rvr.OmahaRange();
 omahaRange.addHand(new Uint8Array([51, 50, 47, 46]), 1.0); // AAKK double suited
 omahaRange.addHand(new Uint8Array([43, 42, 39, 38]), 1.0); // QQJJ
 
+// Set range once (avoids repeated memory transfers)
+calculator.setOmahaRange(omahaRange);
+
 // Hero's hand (4 cards)
 const heroHand = new Uint8Array([35, 34, 31, 30]); // TT99
 
@@ -87,7 +94,6 @@ const flop = new Uint8Array([0, 1, 2]); // 2s 2h 2d
 const numRunouts = 1000;
 const runoutResults = calculator.omahaMonteCarloFlop(
   heroHand,
-  omahaRange,
   flop,
   numRunouts
 );

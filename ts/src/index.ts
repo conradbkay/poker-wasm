@@ -47,9 +47,11 @@ async function main() {
       } hands with non-zero weights`
     )
 
+    // Set ranges once (avoids repeated memory transfers)
+    calculator.setHeroRange(myRange)
+    calculator.setVsRange(vsRange)
+
     const equityResults = calculator.equity_vs_range(
-      myRange,
-      vsRange,
       new Uint8Array(board)
     )
 
