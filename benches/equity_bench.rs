@@ -41,27 +41,27 @@ fn create_random_range(num_hands: usize, board: &[u8]) -> HoldemRange {
 
 // --- Omaha Helpers ---
 
-fn create_random_omaha_hand(used_cards: &HashSet<u8>) -> Option<[u8; 4]> {
+fn create_random_omaha_hand(used_cards: &HashSet<u8>, hand_size: usize) -> Option<Vec<u8>> {
     let mut rng = rand::rng();
     let mut available: Vec<u8> = (0..52u8)
         .filter(|c| !used_cards.contains(c))
         .collect();
 
-    if available.len() < 4 {
+    if available.len() < hand_size {
         return None;
     }
 
     available.shuffle(&mut rng);
-    Some([available[0], available[1], available[2], available[3]])
+    Some(available.into_iter().take(hand_size).collect())
 }
 
-fn create_random_omaha_range(num_hands: usize, used_cards: &HashSet<u8>) -> OmahaRange {
-    let mut range = OmahaRange::new();
+fn create_random_omaha_range(num_hands: usize, used_cards: &HashSet<u8>, hand_size: usize) -> OmahaRange {
+    let mut range = OmahaRange::new(hand_size);
     let mut rng = rand::rng();
     let mut added_hands = HashSet::new();
 
     for _ in 0..num_hands {
-        if let Some(hand) = create_random_omaha_hand(used_cards) {
+        if let Some(hand) = create_random_omaha_hand(used_cards, hand_size) {
             // Avoid duplicates
             let hand_key = format!("{:?}", hand);
             if added_hands.insert(hand_key) {
@@ -77,37 +77,21 @@ fn create_random_omaha_range(num_hands: usize, used_cards: &HashSet<u8>) -> Omah
 // --- Hold'em Benchmarks ---
 
 fn bench_holdem_leaf_equity(c: &mut Criterion) {
-    let hand_sizes = vec![1, 2, 5, 10, 50, 100, 250, 500, 1000];
-
-    // Load hand ranks data once
+    let hand_sizes = vec![ 25, 50, 100, 250, 500, 1000];
     let hand_ranks_data = include_bytes!("../HandRanks.dat").to_vec();
-    let calculator = EquityCalculator::new(hand_ranks_data);
-
     let mut group = c.benchmark_group("holdem_leaf_equity");
 
     for &hand_size in &hand_sizes {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(hand_size),
-            &hand_size,
-            |b, &size| {
-                b.iter_batched(
-                    || {
-                        let board = create_random_board(5);
-                        let vs_range = create_random_range(size, &board);
-                        let my_range = create_random_range(size, &board);
-                        (board, my_range, vs_range)
-                    },
-                    |(board, my_range, vs_range)| {
-                        calculator.leaf_equity_vs_range(
-                            black_box(&my_range),
-                            black_box(&vs_range),
-                            black_box(&board),
-                        )
-                    },
-                    criterion::BatchSize::SmallInput,
-                )
-            },
-        );
+        let board = create_random_board(5);
+        let mut calculator = EquityCalculator::new(hand_ranks_data.clone());
+        calculator.set_hero_range(create_random_range(hand_size, &board));
+        calculator.set_vs_range(create_random_range(hand_size, &board));
+
+        group.bench_function(BenchmarkId::from_parameter(hand_size), |b| {
+            b.iter(|| {
+                calculator.leaf_equity_vs_range(black_box(&board)).unwrap()
+            })
+        });
     }
 
     group.finish();
@@ -116,43 +100,28 @@ fn bench_holdem_leaf_equity(c: &mut Criterion) {
 // --- Omaha Benchmarks ---
 
 fn bench_omaha_leaf_equity(c: &mut Criterion) {
-    let range_sizes = vec![1, 5, 10, 25, 50, 100];
-
+    let range_sizes = vec![25, 50, 100, 250];
     let hand_ranks_data = include_bytes!("../HandRanks.dat").to_vec();
-    let calculator = EquityCalculator::new(hand_ranks_data);
-
     let mut group = c.benchmark_group("omaha_leaf_equity");
 
     for &range_size in &range_sizes {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(range_size),
-            &range_size,
-            |b, &size| {
-                b.iter_batched(
-                    || {
-                        let board = create_random_board(5);
-                        let board_set: HashSet<u8> = board.iter().cloned().collect();
-                        let hero_hand = create_random_omaha_hand(&board_set).unwrap();
+        let board = create_random_board(5);
+        let board_set: HashSet<u8> = board.iter().cloned().collect();
+        let hero_hand = create_random_omaha_hand(&board_set, 4).unwrap();
 
-                        let mut hero_and_board = board_set.clone();
-                        for &c in &hero_hand {
-                            hero_and_board.insert(c);
-                        }
+        let mut hero_and_board = board_set.clone();
+        for &c in &hero_hand {
+            hero_and_board.insert(c);
+        }
 
-                        let vs_range = create_random_omaha_range(size, &hero_and_board);
-                        (board, hero_hand, vs_range)
-                    },
-                    |(board, hero_hand, vs_range)| {
-                        calculator.omaha_leaf_equity_vs_range(
-                            black_box(&hero_hand),
-                            black_box(&vs_range),
-                            black_box(&board),
-                        )
-                    },
-                    criterion::BatchSize::SmallInput,
-                )
-            },
-        );
+        let mut calculator = EquityCalculator::new(hand_ranks_data.clone());
+        calculator.set_omaha_range(create_random_omaha_range(range_size, &hero_and_board, 4));
+
+        group.bench_function(BenchmarkId::from_parameter(range_size), |b| {
+            b.iter(|| {
+                calculator.omaha_leaf_equity_vs_range(black_box(&hero_hand), black_box(&board)).unwrap()
+            })
+        });
     }
 
     group.finish();
@@ -160,51 +129,38 @@ fn bench_omaha_leaf_equity(c: &mut Criterion) {
 
 fn bench_omaha_flop_monte_carlo(c: &mut Criterion) {
     let configs = vec![
-        (50, 100),   // 50 hands, 100 runouts
-        (100, 100),  // 100 hands, 100 runouts
-        (500, 100),  // 500 hands, 100 runouts
+        (50, 100),
+        (100, 100),
+        (500, 100),
         (1000, 25),
-        (1000, 100),  // 1000 hands, 100 runouts
+        (1000, 100),
     ];
 
     let hand_ranks_data = include_bytes!("../HandRanks.dat").to_vec();
-    let calculator = EquityCalculator::new(hand_ranks_data);
-
     let mut group = c.benchmark_group("omaha_flop_monte_carlo");
 
     for &(range_size, num_runouts) in &configs {
-        group.bench_with_input(
-            BenchmarkId::new(
-                format!("range{}", range_size),
-                format!("runouts{}", num_runouts)
-            ),
-            &(range_size, num_runouts),
-            |b, &(size, runouts)| {
-                b.iter_batched(
-                    || {
-                        let flop = create_random_board(3);
-                        let flop_set: HashSet<u8> = flop.iter().cloned().collect();
-                        let hero_hand = create_random_omaha_hand(&flop_set).unwrap();
+        let flop = create_random_board(3);
+        let flop_set: HashSet<u8> = flop.iter().cloned().collect();
+        let hero_hand = create_random_omaha_hand(&flop_set, 4).unwrap();
 
-                        let mut hero_and_flop = flop_set.clone();
-                        for &c in &hero_hand {
-                            hero_and_flop.insert(c);
-                        }
+        let mut hero_and_flop = flop_set.clone();
+        for &c in &hero_hand {
+            hero_and_flop.insert(c);
+        }
 
-                        let vs_range = create_random_omaha_range(size, &hero_and_flop);
-                        (flop, hero_hand, vs_range)
-                    },
-                    |(flop, hero_hand, vs_range)| {
-                        calculator.omaha_monte_carlo_flop(
-                            black_box(&hero_hand),
-                            black_box(&vs_range),
-                            black_box(&flop),
-                            black_box(runouts),
-                        )
-                    },
-                    criterion::BatchSize::SmallInput,
-                )
-            },
+        let mut calculator = EquityCalculator::new(hand_ranks_data.clone());
+        calculator.set_omaha_range(create_random_omaha_range(range_size, &hero_and_flop, 4));
+
+        group.bench_function(
+            BenchmarkId::new(format!("range{}", range_size), format!("runouts{}", num_runouts)),
+            |b| b.iter(|| {
+                calculator.omaha_monte_carlo_flop(
+                    black_box(&hero_hand),
+                    black_box(&flop),
+                    black_box(num_runouts),
+                ).unwrap()
+            })
         );
     }
 

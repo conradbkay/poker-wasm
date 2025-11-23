@@ -1,5 +1,5 @@
 use wasm_bindgen::prelude::*;
-use crate::evaluation::{gen_board_eval, combinations::{HOLE_COMBOS_2_FROM_4, BOARD_COMBOS_3_FROM_5}};
+use crate::evaluation::{gen_board_eval, combinations::{HOLE_COMBOS_2_FROM_4, HOLE_COMBOS_2_FROM_5, HOLE_COMBOS_2_FROM_6, BOARD_COMBOS_3_FROM_5}};
 use crate::types::Equity;
 use crate::range::OmahaRange;
 use rand::Rng;
@@ -27,13 +27,21 @@ impl RunoutEquities {
 
 /// Evaluate a single Omaha hand on a complete 5-card board
 /// In Omaha, players MUST use exactly 2 hole cards + exactly 3 board cards
-/// This means evaluating all C(4,2) × C(5,3) = 6 × 10 = 60 possible 5-card hands
+/// Supports PLO4 (60 combos), PLO5 (100 combos), and PLO6 (150 combos)
 fn eval_omaha_hand(
     ranks_data: &[u8],
-    hole_cards: &[u8; 4],
+    hole_cards: &[u8],
     board: &[u8; 5]
 ) -> i32 {
     let mut best_rank = i32::MIN;
+
+    // Select combination table based on hand size
+    let hole_combos: &[[usize; 2]] = match hole_cards.len() {
+        4 => &HOLE_COMBOS_2_FROM_4,
+        5 => &HOLE_COMBOS_2_FROM_5,
+        6 => &HOLE_COMBOS_2_FROM_6,
+        _ => panic!("Invalid Omaha hand size: {}", hole_cards.len()),
+    };
 
     // Evaluate all 10 possible 3-card board combinations
     for &[b1, b2, b3] in BOARD_COMBOS_3_FROM_5.iter() {
@@ -42,8 +50,8 @@ fn eval_omaha_hand(
         // Create evaluator for this board combination
         let hand_eval = gen_board_eval(ranks_data, &board_triple);
 
-        // Evaluate all 6 possible 2-card hole combinations
-        for &[h1, h2] in HOLE_COMBOS_2_FROM_4.iter() {
+        // Evaluate all possible 2-card hole combinations
+        for &[h1, h2] in hole_combos.iter() {
             let hole_pair = [hole_cards[h1], hole_cards[h2]];
             let rank = hand_eval(&hole_pair);
             best_rank = best_rank.max(rank);
@@ -53,9 +61,9 @@ fn eval_omaha_hand(
     best_rank
 }
 
-/// Check if two 4-card hands share any cards
+/// Check if two hands share any cards (works with any hand size)
 #[inline]
-fn hands_overlap(hand1: &[u8; 4], hand2: &[u8; 4]) -> bool {
+fn hands_overlap(hand1: &[u8], hand2: &[u8]) -> bool {
     for &c1 in hand1 {
         for &c2 in hand2 {
             if c1 == c2 {
@@ -66,9 +74,9 @@ fn hands_overlap(hand1: &[u8; 4], hand2: &[u8; 4]) -> bool {
     false
 }
 
-/// Check if a 4-card hand overlaps with a 5-card board
+/// Check if a hand overlaps with a 5-card board (works with any hand size)
 #[inline]
-fn hand_overlaps_board(hand: &[u8; 4], board: &[u8; 5]) -> bool {
+fn hand_overlaps_board(hand: &[u8], board: &[u8; 5]) -> bool {
     for &c1 in hand {
         for &c2 in board {
             if c1 == c2 {
@@ -92,7 +100,7 @@ fn cards_to_mask(cards: &[u8]) -> u64 {
 /// Calculate equity for a single Omaha hand vs a range on a complete 5-card board
 pub fn calculate_omaha_leaf_equity(
     ranks_data: &[u8],
-    hero_hand: &[u8; 4],
+    hero_hand: &[u8],
     vs_range: &OmahaRange,
     board: &[u8; 5],
 ) -> RunoutEquities {
@@ -135,12 +143,12 @@ pub fn calculate_omaha_leaf_equity(
 /// Enumerate all river runouts from a turn (4-card board)
 fn calculate_omaha_equity_from_turn(
     ranks_data: &[u8],
-    hero_hand: &[u8; 4],
+    hero_hand: &[u8],
     vs_range: &OmahaRange,
     board: &[u8; 4],
 ) -> Vec<RunoutEquities> {
-    let mut results = Vec::new();
     let used_mask = cards_to_mask(board) | cards_to_mask(hero_hand);
+    let mut results = Vec::with_capacity(44);
 
     // Enumerate all river cards
     for river in 0..52u8 {
@@ -169,12 +177,13 @@ fn calculate_omaha_equity_from_turn(
 /// Enumerate all turn and river runouts from a flop (3-card board)
 fn calculate_omaha_equity_from_flop(
     ranks_data: &[u8],
-    hero_hand: &[u8; 4],
+    hero_hand: &[u8],
     vs_range: &OmahaRange,
     board: &[u8; 3],
 ) -> Vec<RunoutEquities> {
-    let mut results = Vec::new();
     let used_mask = cards_to_mask(board) | cards_to_mask(hero_hand);
+    // Pre-allocate: ~45 turn cards × ~44 river cards
+    let mut results = Vec::with_capacity(1980);
 
     // Enumerate all turn cards
     for turn in 0..52u8 {
@@ -217,24 +226,32 @@ pub fn calculate_omaha_equity_vs_range(
     vs_range: &OmahaRange,
     board: &[u8],
 ) -> Result<Vec<RunoutEquities>, String> {
-    if hero_hand.len() != 4 {
-        return Err("Hero hand must be exactly 4 cards".to_string());
+    // Validate hand size
+    if ![4, 5, 6].contains(&hero_hand.len()) {
+        return Err(format!("Omaha hand must be 4, 5, or 6 cards, got {}", hero_hand.len()));
     }
 
-    let hero_cards = [hero_hand[0], hero_hand[1], hero_hand[2], hero_hand[3]];
+    // Validate range matches hero hand size
+    if hero_hand.len() != vs_range.get_hand_size() {
+        return Err(format!(
+            "Hero hand size ({}) must match range hand size ({})",
+            hero_hand.len(),
+            vs_range.get_hand_size()
+        ));
+    }
 
     match board.len() {
         3 => {
             let board_cards = [board[0], board[1], board[2]];
-            Ok(calculate_omaha_equity_from_flop(ranks_data, &hero_cards, vs_range, &board_cards))
+            Ok(calculate_omaha_equity_from_flop(ranks_data, hero_hand, vs_range, &board_cards))
         }
         4 => {
             let board_cards = [board[0], board[1], board[2], board[3]];
-            Ok(calculate_omaha_equity_from_turn(ranks_data, &hero_cards, vs_range, &board_cards))
+            Ok(calculate_omaha_equity_from_turn(ranks_data, hero_hand, vs_range, &board_cards))
         }
         5 => {
             let board_cards = [board[0], board[1], board[2], board[3], board[4]];
-            Ok(vec![calculate_omaha_leaf_equity(ranks_data, &hero_cards, vs_range, &board_cards)])
+            Ok(vec![calculate_omaha_leaf_equity(ranks_data, hero_hand, vs_range, &board_cards)])
         }
         _ => Err("Board must be 3, 4, or 5 cards".to_string())
     }
@@ -242,7 +259,7 @@ pub fn calculate_omaha_equity_vs_range(
 
 /// Sample 2 random cards from available deck (avoiding used cards)
 /// Returns None if unable to sample (shouldn't happen with valid inputs)
-fn sample_two_cards<R: Rng>(rng: &mut R, used_mask: u64) -> Option<[u8; 2]> {
+fn sample_two_cards(used_mask: u64) -> Option<[u8; 2]> {
     // Build list of available cards
     let mut available: Vec<u8> = (0..52u8)
         .filter(|&card| (used_mask & (1u64 << card)) == 0)
@@ -252,11 +269,11 @@ fn sample_two_cards<R: Rng>(rng: &mut R, used_mask: u64) -> Option<[u8; 2]> {
         return None;
     }
 
+    let mut rng = rand::rng();
+
     // Sample first card
     let idx1 = rng.random_range(0..available.len());
     let card1 = available.swap_remove(idx1);
-
-    // Sample second card
     let idx2 = rng.random_range(0..available.len());
     let card2 = available.swap_remove(idx2);
 
@@ -268,18 +285,17 @@ fn sample_two_cards<R: Rng>(rng: &mut R, used_mask: u64) -> Option<[u8; 2]> {
 /// Returns equity for each sampled runout
 pub fn calculate_omaha_equity_monte_carlo_flop(
     ranks_data: &[u8],
-    hero_hand: &[u8; 4],
+    hero_hand: &[u8],
     vs_range: &OmahaRange,
     flop: &[u8; 3],
     num_runouts: usize,
 ) -> Vec<RunoutEquities> {
-    let mut rng = rand::rng();
     let used_mask = cards_to_mask(flop) | cards_to_mask(hero_hand);
     let mut results = Vec::with_capacity(num_runouts);
 
     for _ in 0..num_runouts {
         // Sample random turn and river
-        if let Some([turn, river]) = sample_two_cards(&mut rng, used_mask) {
+        if let Some([turn, river]) = sample_two_cards(used_mask) {
             let full_board = [flop[0], flop[1], flop[2], turn, river];
 
             let runout_equity = calculate_omaha_leaf_equity(

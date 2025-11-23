@@ -116,7 +116,7 @@ impl EquityCalculator {
     }
 
     /// Calculate Omaha leaf equity (5-card board only, no enumeration)
-    /// hero_hand must be exactly 4 cards
+    /// hero_hand must be 4, 5, or 6 cards (matching the range)
     /// board must be exactly 5 cards
     /// IMPORTANT: Call setOmahaRange before using this method
     #[wasm_bindgen(js_name = omahaLeafEquityVsRange)]
@@ -128,26 +128,32 @@ impl EquityCalculator {
         let vs_range = self.cached_omaha_range.as_ref()
             .ok_or("No Omaha range set. Call setOmahaRange first.")?;
 
-        if hero_hand.len() != 4 {
-            return Err("Hero hand must be exactly 4 cards".to_string());
+        if ![4, 5, 6].contains(&hero_hand.len()) {
+            return Err(format!("Hero hand must be 4, 5, or 6 cards, got {}", hero_hand.len()));
+        }
+        if hero_hand.len() != vs_range.hand_size() {
+            return Err(format!(
+                "Hero hand size ({}) must match range hand size ({})",
+                hero_hand.len(),
+                vs_range.hand_size()
+            ));
         }
         if board.len() != 5 {
             return Err("Board must be exactly 5 cards".to_string());
         }
 
-        let hero_cards = [hero_hand[0], hero_hand[1], hero_hand[2], hero_hand[3]];
         let board_cards = [board[0], board[1], board[2], board[3], board[4]];
 
         Ok(equity::omaha::calculate_omaha_leaf_equity(
             &self.hand_ranks_data,
-            &hero_cards,
+            hero_hand,
             vs_range,
             &board_cards
         ))
     }
 
     /// Calculate Omaha equity using Monte Carlo simulation on the flop
-    /// hero_hand must be exactly 4 cards
+    /// hero_hand must be 4, 5, or 6 cards (matching the range)
     /// flop must be exactly 3 cards
     /// num_runouts controls accuracy vs speed tradeoff
     /// IMPORTANT: Call setOmahaRange before using this method
@@ -161,19 +167,25 @@ impl EquityCalculator {
         let vs_range = self.cached_omaha_range.as_ref()
             .ok_or("No Omaha range set. Call setOmahaRange first.")?;
 
-        if hero_hand.len() != 4 {
-            return Err("Hero hand must be exactly 4 cards".to_string());
+        if ![4, 5, 6].contains(&hero_hand.len()) {
+            return Err(format!("Hero hand must be 4, 5, or 6 cards, got {}", hero_hand.len()));
+        }
+        if hero_hand.len() != vs_range.hand_size() {
+            return Err(format!(
+                "Hero hand size ({}) must match range hand size ({})",
+                hero_hand.len(),
+                vs_range.hand_size()
+            ));
         }
         if flop.len() != 3 {
             return Err("Flop must be exactly 3 cards".to_string());
         }
 
-        let hero_cards = [hero_hand[0], hero_hand[1], hero_hand[2], hero_hand[3]];
         let flop_cards = [flop[0], flop[1], flop[2]];
 
         Ok(equity::omaha::calculate_omaha_equity_monte_carlo_flop(
             &self.hand_ranks_data,
-            &hero_cards,
+            hero_hand,
             vs_range,
             &flop_cards,
             num_runouts
