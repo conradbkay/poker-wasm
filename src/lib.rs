@@ -95,13 +95,11 @@ impl EquityCalculator {
         let vs_range = self.cached_vs_range.as_ref()
             .ok_or("No villain range set. Call setVsRange first.")?;
 
-        let mut blocked_prefix = Vec::new();
         Ok(equity::holdem::calculate_leaf_equity(
             &self.hand_ranks_data,
             hero_range,
             vs_range,
             board,
-            &mut blocked_prefix,
         ))
     }
 

@@ -1,21 +1,23 @@
 use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 use rand::Rng;
 use rand::seq::SliceRandom;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use poker_wasm::{HoldemRange, OmahaRange, EquityCalculator};
 use std::hint::black_box;
 use std::collections::HashSet;
 
 // --- Hold'em Helpers ---
 
-fn create_random_board(num_cards: usize) -> Vec<u8> {
-    let mut rng = rand::rng();
+fn create_random_board(num_cards: usize, seed: u64) -> Vec<u8> {
+    let mut rng = StdRng::seed_from_u64(seed);
     let mut deck: Vec<u8> = (0..52).collect();
     deck.shuffle(&mut rng);
     deck.into_iter().take(num_cards).collect()
 }
 
-fn create_random_range(num_hands: usize, board: &[u8]) -> HoldemRange {
-    let mut rng = rand::rng();
+fn create_random_range(num_hands: usize, board: &[u8], seed: u64) -> HoldemRange {
+    let mut rng = StdRng::seed_from_u64(seed);
     let mut range = HoldemRange::new();
     let board_cards: HashSet<u8> = board.iter().cloned().collect();
 
@@ -82,10 +84,10 @@ fn bench_holdem_leaf_equity(c: &mut Criterion) {
     let mut group = c.benchmark_group("holdem_leaf_equity");
 
     for &hand_size in &hand_sizes {
-        let board = create_random_board(5);
+        let board = create_random_board(5, 0xB0A12 + hand_size as u64);
         let mut calculator = EquityCalculator::new(hand_ranks_data.clone());
-        calculator.set_hero_range(create_random_range(hand_size, &board));
-        calculator.set_vs_range(create_random_range(hand_size, &board));
+        calculator.set_hero_range(create_random_range(hand_size, &board, 0x4E40 + hand_size as u64));
+        calculator.set_vs_range(create_random_range(hand_size, &board, 0x5151 + hand_size as u64));
 
         group.bench_function(BenchmarkId::from_parameter(hand_size), |b| {
             b.iter(|| {
@@ -105,7 +107,7 @@ fn bench_omaha_leaf_equity(c: &mut Criterion) {
     let mut group = c.benchmark_group("omaha_leaf_equity");
 
     for &range_size in &range_sizes {
-        let board = create_random_board(5);
+        let board = create_random_board(5, range_size as u64);
         let board_set: HashSet<u8> = board.iter().cloned().collect();
         let hero_hand = create_random_omaha_hand(&board_set, 4).unwrap();
 
@@ -140,7 +142,7 @@ fn bench_omaha_flop_monte_carlo(c: &mut Criterion) {
     let mut group = c.benchmark_group("omaha_flop_monte_carlo");
 
     for &(range_size, num_runouts) in &configs {
-        let flop = create_random_board(3);
+        let flop = create_random_board(3, range_size as u64);
         let flop_set: HashSet<u8> = flop.iter().cloned().collect();
         let hero_hand = create_random_omaha_hand(&flop_set, 4).unwrap();
 

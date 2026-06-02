@@ -50,16 +50,15 @@ pub fn hand_leaf_equity_vs_range(
 
 /// Computes leaf (5-card board) equity for `hero_range` vs `vs_range`.
 ///
-/// Takes a caller-owned `blocked_prefix` scratch buffer so the board-enumeration
-/// path can reuse one allocation across its ~1980 leaves instead of allocating
-/// `n_combos * 52` floats per leaf. One-shot callers can just pass a fresh
-/// `&mut Vec::new()`.
+/// Walks the combos once in strength order, carrying the blocker-adjusted villain
+/// weight in two `[f32; 52]` accumulators (per-card weight of strictly-weaker combos,
+/// plus per-card totals). This replaces the old `n_combos * 52` prefix-sum matrix:
+/// same win/tie/lose output, but O(52) scratch instead of up to ~275 KB per leaf.
 pub fn calculate_leaf_equity(
     hand_ranks_data: &[i32],
     hero_range: &HoldemRange,
     vs_range: &HoldemRange,
     board: &[u8],
-    blocked_prefix: &mut Vec<f32>,
 ) -> Vec<EquityResult> {
     assert!(board.len() >= 3 && board.len() <= 5, "board must be 3-5 cards");
 
@@ -92,121 +91,69 @@ pub fn calculate_leaf_equity(
 
     all_combos.sort_unstable_by_key(|a| a.p);
 
-    let n_combos: usize = all_combos.len();
-    let mut total_weight = 0.0;
-    let mut weight_prefix = Vec::with_capacity(n_combos);
+    let n_combos = all_combos.len();
 
-    let mut cur_p = -1;
-    let mut rank_ranges = Vec::new();
-    let mut cur_p_idx_range: (usize, usize) = (0, 0);
-    let mut cur_rank_idx = -1;
-    let mut idx_to_range_idx: [usize; 1326] = [0; 1326];
-
-    for (i, combo_info) in all_combos.iter().enumerate() {
+    // Total villain weight, and per-card villain weight (used for the `lose` complement).
+    let mut total_weight = 0.0f32;
+    let mut blocked_total = [0.0f32; 52];
+    for combo_info in &all_combos {
         total_weight += combo_info.vs_weight;
-        weight_prefix.push(total_weight);
-
-        if combo_info.p != cur_p {
-            cur_rank_idx += 1; // on first iter cur_rank_idx becomes 0
-            cur_p = combo_info.p;
-            cur_p_idx_range = (i, i);
-            rank_ranges.push((i, i));
-        } else {
-            cur_p_idx_range.1 = i;
-            rank_ranges[cur_rank_idx as usize].1 = i;
-        }
-
-        idx_to_range_idx[combo_info.idx as usize] = cur_rank_idx as usize;
-    }
-
-    blocked_prefix.clear();
-    blocked_prefix.resize(n_combos * 52, 0.0);
-
-    if n_combos > 0 {
-        // handle i=0 case
-        let combo_info = &all_combos[0];
-        let c1 = combo_info.combo[0] as usize;
-        let c2 = combo_info.combo[1] as usize;
-        blocked_prefix[c1] += combo_info.vs_weight;
-        blocked_prefix[c2] += combo_info.vs_weight;
-
-        for (i, combo_info) in all_combos.iter().enumerate().skip(1) {
-            let prev_slice_start = (i - 1) * 52;
-            let curr_slice_start = i * 52;
-
-            // copy previous cumulative sums
-            blocked_prefix
-                .copy_within(prev_slice_start..prev_slice_start + 52, curr_slice_start);
-
-            // add current combo's weight
-            let c1 = combo_info.combo[0] as usize;
-            let c2 = combo_info.combo[1] as usize;
-            blocked_prefix[curr_slice_start + c1] += combo_info.vs_weight;
-            blocked_prefix[curr_slice_start + c2] += combo_info.vs_weight;
-        }
+        blocked_total[combo_info.combo[0] as usize] += combo_info.vs_weight;
+        blocked_total[combo_info.combo[1] as usize] += combo_info.vs_weight;
     }
 
     let mut result = Vec::with_capacity(hero_range.range.iter().filter(|&&w| w > 0.0).count());
-    for combo_info in all_combos.iter() {
-        if combo_info.self_weight == 0.0 {
-            continue;
+
+    // Per-card villain weight of all combos in strictly-weaker strength groups.
+    let mut weaker_sum = 0.0f32;
+    let mut weaker_minus = [0.0f32; 52];
+
+    let mut i = 0;
+    while i < n_combos {
+        // Collect the equal-strength group [i, j) and its per-card weight.
+        let group_p = all_combos[i].p;
+        let mut j = i;
+        let mut group_sum = 0.0f32;
+        let mut group_minus = [0.0f32; 52];
+        while j < n_combos && all_combos[j].p == group_p {
+            let combo_info = &all_combos[j];
+            group_sum += combo_info.vs_weight;
+            group_minus[combo_info.combo[0] as usize] += combo_info.vs_weight;
+            group_minus[combo_info.combo[1] as usize] += combo_info.vs_weight;
+            j += 1;
         }
 
-        let combo = combo_info.combo;
-        let rank_idx = idx_to_range_idx[combo_info.idx as usize];
-        let (idx_range_start, idx_range_end) = rank_ranges[rank_idx];
-
-        let mut beat_weight = if idx_range_start > 0 {
-            weight_prefix[idx_range_start - 1]
-        } else {
-            0.0
-        };
-        let mut tie_weight =
-            weight_prefix[idx_range_end] - beat_weight;
-        let mut after_blocker_weight = total_weight;
-
-        for &card in &combo {
-            let card_usize = card as usize;
-            if n_combos > 0 {
-                let blocked_weight = blocked_prefix[(n_combos - 1) * 52 + card_usize];
-
-                let blocked_beat_weight = if idx_range_start > 0 {
-                    blocked_prefix[(idx_range_start - 1) * 52 + card_usize]
-                } else {
-                    0.0
-                };
-                let blocked_tie_weight = blocked_prefix[idx_range_end * 52 + card_usize] - if idx_range_start > 0 {
-                    blocked_prefix[(idx_range_start - 1) * 52 + card_usize]
-                } else {
-                    0.0
-                };
-
-                after_blocker_weight -= blocked_weight;
-                beat_weight -= blocked_beat_weight;
-                tie_weight -= blocked_tie_weight;
+        // Emit hero hands in this group. `weaker_minus` still holds the weight of
+        // everything strictly weaker (we roll the group in only after emitting).
+        for combo_info in &all_combos[i..j] {
+            if combo_info.self_weight == 0.0 {
+                continue;
             }
+            let c1 = combo_info.combo[0] as usize;
+            let c2 = combo_info.combo[1] as usize;
+            let own = combo_info.vs_weight;
 
+            // `+ own`: hero's own combo shares both cards, so it is subtracted twice
+            // (once per card) and must be added back once.
+            let win = weaker_sum - weaker_minus[c1] - weaker_minus[c2];
+            let tie = group_sum - group_minus[c1] - group_minus[c2] + own;
+            let unblocked_total = total_weight - blocked_total[c1] - blocked_total[c2] + own;
+            let lose = unblocked_total - win - tie;
+
+            result.push(EquityResult {
+                combo: combo_info.combo,
+                hand_idx: combo_info.idx as usize,
+                equity: Equity { win, tie, lose },
+            });
         }
 
-        let double_blocked_weight = if n_combos > 0 {
-            combo_info.vs_weight
-        } else {
-            0.0
-        };
-        after_blocker_weight += double_blocked_weight;
-        tie_weight += double_blocked_weight;
+        // Roll this group into the strictly-weaker accumulator for later groups.
+        weaker_sum += group_sum;
+        for c in 0..52 {
+            weaker_minus[c] += group_minus[c];
+        }
 
-        let lose_weight = after_blocker_weight - beat_weight - tie_weight;
-
-        result.push(EquityResult {
-            combo,
-            hand_idx: combo_info.idx as usize,
-            equity: Equity {
-                win: beat_weight,
-                tie: tie_weight,
-                lose: lose_weight,
-            },
-        });
+        i = j;
     }
 
     result
@@ -223,11 +170,8 @@ pub fn calculate_equity_vs_range(
         return Err("Board must have 3, 4, or 5 cards".to_string());
     }
 
-    // Reused across every runout to avoid reallocating the prefix buffer per leaf.
-    let mut blocked_prefix = Vec::new();
-
     if board.len() == 5 {
-        return Ok(calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, board, &mut blocked_prefix));
+        return Ok(calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, board));
     }
 
     let mut aggregated_equities = vec![Equity::default(); 1326];
@@ -243,7 +187,7 @@ pub fn calculate_equity_vs_range(
                 if (turn_mask & (1u64 << river)) != 0 { continue; }
 
                 let full_board = [board[0], board[1], board[2], turn, river];
-                let equity_results = calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, &full_board, &mut blocked_prefix);
+                let equity_results = calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, &full_board);
                 for result in equity_results {
                     aggregated_equities[result.hand_idx].win += result.equity.win;
                     aggregated_equities[result.hand_idx].tie += result.equity.tie;
@@ -259,7 +203,7 @@ pub fn calculate_equity_vs_range(
             if (board_mask & (1u64 << river)) != 0 { continue; }
 
             let full_board = [board[0], board[1], board[2], board[3], river];
-            let equity_results = calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, &full_board, &mut blocked_prefix);
+            let equity_results = calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, &full_board);
             for result in equity_results {
                 aggregated_equities[result.hand_idx].win += result.equity.win;
                 aggregated_equities[result.hand_idx].tie += result.equity.tie;
