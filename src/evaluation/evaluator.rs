@@ -1,29 +1,24 @@
 // --- Hand Evaluation Functions ---
 
-#[inline]
-pub fn next_p(ranks_data: &[u8], p_plus_card: usize) -> u32 {
+#[inline(always)]
+pub fn next_p(ranks_data: &[i32], p_plus_card: usize) -> u32 {
     // next_p(x) is equivalent to final_p(x+1)
     final_p(ranks_data, p_plus_card + 1)
 }
 
-pub fn final_p(ranks_data: &[u8], p: usize) -> u32 {
-    let offset = p * 4;
-    if offset + 4 <= ranks_data.len() {
-        u32::from_le_bytes([
-            ranks_data[offset],
-            ranks_data[offset + 1],
-            ranks_data[offset + 2],
-            ranks_data[offset + 3],
-        ])
-    } else {
-        0 // Fallback for out of bounds
-    }
+#[inline(always)]
+pub fn final_p(ranks_data: &[i32], p: usize) -> u32 {
+    // The rank table is logically u32s (preconverted once at construction),
+    // so this is a single indexed load. `.get` preserves the original
+    // out-of-bounds-returns-0 semantics.
+    ranks_data.get(p).copied().unwrap_or(0) as u32
 }
 
 /**
  * doesn't return the correct final values for 5/6 cards, use fast_eval_partial for that
  */
-pub fn fast_eval(ranks_data: &[u8], cards: &[u8], mut p: usize) -> u32 {
+#[inline]
+pub fn fast_eval(ranks_data: &[i32], cards: &[u8], mut p: usize) -> u32 {
     for &card in cards {
         p = next_p(ranks_data, p + card as usize) as usize;
     }
@@ -31,7 +26,7 @@ pub fn fast_eval(ranks_data: &[u8], cards: &[u8], mut p: usize) -> u32 {
 }
 
 #[inline]
-pub fn gen_board_eval<'a>(ranks_data: &'a [u8], board: &'a [u8]) -> impl Fn(&[u8]) -> i32 + 'a {
+pub fn gen_board_eval<'a>(ranks_data: &'a [i32], board: &'a [u8]) -> impl Fn(&[u8]) -> i32 + 'a {
     let board_p = fast_eval(ranks_data, board, 53) as usize;
     let board_len = board.len();
 

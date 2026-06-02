@@ -15,7 +15,9 @@ pub use types::*;
 /// Main calculator struct - holds hand evaluation data
 #[wasm_bindgen]
 pub struct EquityCalculator {
-    hand_ranks_data: Vec<u8>,
+    // Logically the 2+2-style table is u32s; stored as i32 so every lookup is a
+    // single indexed load instead of reassembling a u32 from 4 bytes each call.
+    hand_ranks_data: Vec<i32>,
     cached_hero_range: Option<HoldemRange>,
     cached_vs_range: Option<HoldemRange>,
     cached_omaha_range: Option<OmahaRange>,
@@ -25,8 +27,14 @@ pub struct EquityCalculator {
 impl EquityCalculator {
     #[wasm_bindgen(constructor)]
     pub fn new(data: Vec<u8>) -> Self {
+        // Convert the raw little-endian byte table to i32 once, up front.
+        let hand_ranks_data = data
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
         EquityCalculator {
-            hand_ranks_data: data,
+            hand_ranks_data,
             cached_hero_range: None,
             cached_vs_range: None,
             cached_omaha_range: None,
@@ -87,11 +95,13 @@ impl EquityCalculator {
         let vs_range = self.cached_vs_range.as_ref()
             .ok_or("No villain range set. Call setVsRange first.")?;
 
+        let mut blocked_prefix = Vec::new();
         Ok(equity::holdem::calculate_leaf_equity(
             &self.hand_ranks_data,
             hero_range,
             vs_range,
-            board
+            board,
+            &mut blocked_prefix,
         ))
     }
 

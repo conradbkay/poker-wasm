@@ -9,6 +9,9 @@ pub struct OmahaRange {
     // Using max size array [u8; 6], with hand_size indicating actual cards used
     hands: Vec<[u8; 6]>,
     weights: Vec<f32>,
+    // Precomputed 52-bit card masks (one per hand), so card-removal checks are a
+    // single AND instead of an O(n*m) nested loop. Kept in lockstep with `hands`.
+    masks: Vec<u64>,
     hand_size: usize, // 4, 5, or 6
 }
 
@@ -23,6 +26,7 @@ impl OmahaRange {
         Self {
             hands: Vec::new(),
             weights: Vec::new(),
+            masks: Vec::new(),
             hand_size,
         }
     }
@@ -35,11 +39,14 @@ impl OmahaRange {
             panic!("Hand must have exactly {} cards", self.hand_size);
         }
         let mut hand_array = [0u8; 6];
+        let mut mask = 0u64;
         for (i, &card) in hand.iter().enumerate() {
             hand_array[i] = card;
+            mask |= 1u64 << card;
         }
         self.hands.push(hand_array);
         self.weights.push(weight);
+        self.masks.push(mask);
     }
 
     /// Get the number of hands in the range
@@ -68,6 +75,18 @@ impl OmahaRange {
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], f32)> + '_ {
         let hand_size = self.hand_size;
         self.hands.iter().map(move |h| &h[..hand_size]).zip(self.weights.iter().copied())
+    }
+
+    /// Iterator over (hand slice, weight, precomputed card mask) triples.
+    /// The mask lets callers do card-removal checks with a single AND.
+    pub fn iter_masked(&self) -> impl Iterator<Item = (&[u8], f32, u64)> + '_ {
+        let hand_size = self.hand_size;
+        self.hands
+            .iter()
+            .map(move |h| &h[..hand_size])
+            .zip(self.weights.iter().copied())
+            .zip(self.masks.iter().copied())
+            .map(|((h, w), m)| (h, w, m))
     }
 
     /// Get a specific hand by index (returns slice of valid cards)

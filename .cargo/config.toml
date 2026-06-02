@@ -1,4 +1,10 @@
 [target.wasm32-unknown-unknown]
 rustflags = [
-  "--cfg", "getrandom_backend=\"wasm_js\""
+  "--cfg", "getrandom_backend=\"wasm_js\"",
+  # SIMD + bulk-memory. bulk-memory speeds up the memcpy/memset in the
+  # Hold'em prefix-sum (copy_within / vec![0.0; ..]); simd128 enables LLVM
+  # autovectorization of the mask/weight loops. NOTE: a simd128 binary only
+  # runs on engines that support it (Chrome 91+, Firefox 89+, Safari 16.4+).
+  # Drop +simd128 if you must support older browsers.
+  "-C", "target-feature=+simd128,+bulk-memory",
 ]

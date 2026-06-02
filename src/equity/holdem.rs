@@ -4,7 +4,7 @@ use super::blocker::ComboInfo;
 use crate::{Equity, EquityResult, HoldemRange};
 
 pub fn hand_leaf_equity_vs_range(
-    hand_ranks_data: &[u8],
+    hand_ranks_data: &[i32],
     hand: &[u8; 2],
     vs_range: &HoldemRange,
     board: &[u8],
@@ -48,11 +48,18 @@ pub fn hand_leaf_equity_vs_range(
     }
 }
 
+/// Computes leaf (5-card board) equity for `hero_range` vs `vs_range`.
+///
+/// Takes a caller-owned `blocked_prefix` scratch buffer so the board-enumeration
+/// path can reuse one allocation across its ~1980 leaves instead of allocating
+/// `n_combos * 52` floats per leaf. One-shot callers can just pass a fresh
+/// `&mut Vec::new()`.
 pub fn calculate_leaf_equity(
-    hand_ranks_data: &[u8],
+    hand_ranks_data: &[i32],
     hero_range: &HoldemRange,
     vs_range: &HoldemRange,
     board: &[u8],
+    blocked_prefix: &mut Vec<f32>,
 ) -> Vec<EquityResult> {
     assert!(board.len() >= 3 && board.len() <= 5, "board must be 3-5 cards");
 
@@ -112,7 +119,8 @@ pub fn calculate_leaf_equity(
         idx_to_range_idx[combo_info.idx as usize] = cur_rank_idx as usize;
     }
 
-    let mut blocked_prefix = vec![0.0; n_combos * 52];
+    blocked_prefix.clear();
+    blocked_prefix.resize(n_combos * 52, 0.0);
 
     if n_combos > 0 {
         // handle i=0 case
@@ -206,7 +214,7 @@ pub fn calculate_leaf_equity(
 
 /// Calculate equity with board enumeration (3, 4, or 5-card boards)
 pub fn calculate_equity_vs_range(
-    hand_ranks_data: &[u8],
+    hand_ranks_data: &[i32],
     hero_range: &HoldemRange,
     vs_range: &HoldemRange,
     board: &[u8],
@@ -215,8 +223,11 @@ pub fn calculate_equity_vs_range(
         return Err("Board must have 3, 4, or 5 cards".to_string());
     }
 
+    // Reused across every runout to avoid reallocating the prefix buffer per leaf.
+    let mut blocked_prefix = Vec::new();
+
     if board.len() == 5 {
-        return Ok(calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, board));
+        return Ok(calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, board, &mut blocked_prefix));
     }
 
     let mut aggregated_equities = vec![Equity::default(); 1326];
@@ -232,7 +243,7 @@ pub fn calculate_equity_vs_range(
                 if (turn_mask & (1u64 << river)) != 0 { continue; }
 
                 let full_board = [board[0], board[1], board[2], turn, river];
-                let equity_results = calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, &full_board);
+                let equity_results = calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, &full_board, &mut blocked_prefix);
                 for result in equity_results {
                     aggregated_equities[result.hand_idx].win += result.equity.win;
                     aggregated_equities[result.hand_idx].tie += result.equity.tie;
@@ -248,7 +259,7 @@ pub fn calculate_equity_vs_range(
             if (board_mask & (1u64 << river)) != 0 { continue; }
 
             let full_board = [board[0], board[1], board[2], board[3], river];
-            let equity_results = calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, &full_board);
+            let equity_results = calculate_leaf_equity(hand_ranks_data, hero_range, vs_range, &full_board, &mut blocked_prefix);
             for result in equity_results {
                 aggregated_equities[result.hand_idx].win += result.equity.win;
                 aggregated_equities[result.hand_idx].tie += result.equity.tie;
