@@ -200,6 +200,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "holdem-hand-evaluator"
+version = "0.1.0"
+source = "git+https://github.com/b-inary/holdem-hand-evaluator#d7b2a5bba4015f96855d5cd66d21f781d3cbcf9b"
+dependencies = [
+ "holdem-hand-evaluator-assets",
+]
+
+[[package]]
+name = "holdem-hand-evaluator-assets"
+version = "0.1.0"
+source = "git+https://github.com/b-inary/holdem-hand-evaluator#d7b2a5bba4015f96855d5cd66d21f781d3cbcf9b"
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -232,12 +245,6 @@ dependencies = [
  "once_cell",
  "wasm-bindgen",
 ]
-
-[[package]]
-name = "lazy_static"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
@@ -312,7 +319,7 @@ version = "2.0.0"
 dependencies = [
  "criterion",
  "getrandom",
- "lazy_static",
+ "holdem-hand-evaluator",
  "rand",
  "wasm-bindgen",
 ]

@@ -1,23 +1,20 @@
 use wasm_bindgen::prelude::*;
 
 // Module declarations
-mod evaluation;
 mod equity;
+mod evaluation;
 mod range;
 mod types;
 
 // Re-exports for use throughout the crate and externally
-pub use evaluation::*;
 pub use equity::*;
+pub use evaluation::*;
 pub use range::*;
 pub use types::*;
 
-/// Main calculator struct - holds hand evaluation data
+/// Main calculator struct - holds cached ranges.
 #[wasm_bindgen]
 pub struct EquityCalculator {
-    // Logically the 2+2-style table is u32s; stored as i32 so every lookup is a
-    // single indexed load instead of reassembling a u32 from 4 bytes each call.
-    hand_ranks_data: Vec<i32>,
     cached_hero_range: Option<HoldemRange>,
     cached_vs_range: Option<HoldemRange>,
     cached_omaha_hero_range: Option<OmahaRange>,
@@ -26,16 +23,11 @@ pub struct EquityCalculator {
 
 #[wasm_bindgen]
 impl EquityCalculator {
+    /// `data` is accepted for compatibility with older JS callers. Hold'em no
+    /// longer needs a 2+2 rank table.
     #[wasm_bindgen(constructor)]
-    pub fn new(data: Vec<u8>) -> Self {
-        // Convert the raw little-endian byte table to i32 once, up front.
-        let hand_ranks_data = data
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-
+    pub fn new(_data: Vec<u8>) -> Self {
         EquityCalculator {
-            hand_ranks_data,
             cached_hero_range: None,
             cached_vs_range: None,
             cached_omaha_hero_range: None,
@@ -75,21 +67,17 @@ impl EquityCalculator {
     /// Enumerates all possible runouts for incomplete boards (3 or 4 cards)
     /// IMPORTANT: Call setHeroRange and setVsRange before using this method
     #[wasm_bindgen]
-    pub fn equity_vs_range(
-        &self,
-        board: &[u8],
-    ) -> Result<Vec<EquityResult>, String> {
-        let hero_range = self.cached_hero_range.as_ref()
+    pub fn equity_vs_range(&self, board: &[u8]) -> Result<Vec<EquityResult>, String> {
+        let hero_range = self
+            .cached_hero_range
+            .as_ref()
             .ok_or("No hero range set. Call setHeroRange first.")?;
-        let vs_range = self.cached_vs_range.as_ref()
+        let vs_range = self
+            .cached_vs_range
+            .as_ref()
             .ok_or("No villain range set. Call setVsRange first.")?;
 
-        equity::holdem::calculate_equity_vs_range(
-            &self.hand_ranks_data,
-            hero_range,
-            vs_range,
-            board
-        )
+        equity::holdem::calculate_equity_vs_range(hero_range, vs_range, board)
     }
 
     /// Equity of every hand in the hero range vs the villain range, aggregated
@@ -103,18 +91,16 @@ impl EquityCalculator {
         board: &[u8],
         max_runouts: Option<usize>,
     ) -> Result<Vec<OmahaEquityResult>, String> {
-        let hero_range = self.cached_omaha_hero_range.as_ref()
+        let hero_range = self
+            .cached_omaha_hero_range
+            .as_ref()
             .ok_or("No Omaha hero range set. Call setOmahaHeroRange first.")?;
-        let vs_range = self.cached_omaha_vs_range.as_ref()
+        let vs_range = self
+            .cached_omaha_vs_range
+            .as_ref()
             .ok_or("No Omaha villain range set. Call setOmahaVsRange first.")?;
 
-        equity::omaha::calculate_omaha_range_equity(
-            &self.hand_ranks_data,
-            hero_range,
-            vs_range,
-            board,
-            max_runouts,
-        )
+        equity::omaha::calculate_omaha_range_equity(hero_range, vs_range, board, max_runouts)
     }
 }
 

@@ -1,12 +1,5 @@
 /// All ways to choose 2 cards from 4 hole cards: C(4,2) = 6
-pub const HOLE_COMBOS_2_FROM_4: [[usize; 2]; 6] = [
-    [0, 1],
-    [0, 2],
-    [0, 3],
-    [1, 2],
-    [1, 3],
-    [2, 3],
-];
+pub const HOLE_COMBOS_2_FROM_4: [[usize; 2]; 6] = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
 
 pub const HOLE_COMBOS_2_FROM_5: [[usize; 2]; 10] = [
     [0, 1],

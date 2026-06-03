@@ -1,8 +1,13 @@
-use wasm_bindgen::prelude::*;
-use crate::evaluation::{fast_eval, final_p, next_p, combinations::{HOLE_COMBOS_2_FROM_4, HOLE_COMBOS_2_FROM_5, HOLE_COMBOS_2_FROM_6, BOARD_COMBOS_3_FROM_5}};
-use crate::types::Equity;
+use crate::evaluation::{
+    OmahaBoardState,
+    combinations::{
+        BOARD_COMBOS_3_FROM_5, HOLE_COMBOS_2_FROM_4, HOLE_COMBOS_2_FROM_5, HOLE_COMBOS_2_FROM_6,
+    },
+};
 use crate::range::OmahaRange;
+use crate::types::Equity;
 use rand::Rng;
+use wasm_bindgen::prelude::*;
 
 /// Output structure for enumerated board runouts
 #[wasm_bindgen]
@@ -46,52 +51,27 @@ impl OmahaEquityResult {
     }
 }
 
-/// Evaluate a single Omaha hand on a complete 5-card board
-/// In Omaha, players MUST use exactly 2 hole cards + exactly 3 board cards
-/// Supports PLO4 (60 combos), PLO5 (100 combos), and PLO6 (150 combos)
-/// Precompute the evaluator state (`p`) for each of the 10 three-card board
-/// subsets. These depend only on the board, so they're constant across the hero
-/// hand and every villain hand on a given leaf — computing them once avoids
-/// re-walking the board (3 table lookups × 10 subsets) for every hand evaluated.
+/// Precompute the board state for each of the 10 three-card board subsets. These
+/// depend only on the board, so they're constant across the hero hand and every
+/// villain hand on a given leaf — computing them once avoids rebuilding the board
+/// portion for every hand evaluated.
 #[inline]
-fn compute_board_ps(ranks_data: &[i32], board: &[u8; 5]) -> [usize; 10] {
-    let mut ps = [0usize; 10];
-    for (i, &[b1, b2, b3]) in BOARD_COMBOS_3_FROM_5.iter().enumerate() {
-        let board_triple = [board[b1], board[b2], board[b3]];
-        ps[i] = fast_eval(ranks_data, &board_triple, 53) as usize;
-    }
-    ps
+fn compute_board_ps(board: &[u8; 5]) -> [OmahaBoardState; 10] {
+    std::array::from_fn(|i| {
+        let [b1, b2, b3] = BOARD_COMBOS_3_FROM_5[i];
+        OmahaBoardState::from_cards(&[board[b1], board[b2], board[b3]])
+    })
 }
 
 /// Evaluate a single Omaha hand given precomputed per-subset board states.
 /// In Omaha, players MUST use exactly 2 hole cards + exactly 3 board cards.
 /// Supports PLO4 (60 combos), PLO5 (100 combos), and PLO6 (150 combos).
-fn eval_omaha_hand(
-    ranks_data: &[i32],
-    hole_cards: &[u8],
-    board_ps: &[usize; 10],
-) -> i32 {
+fn eval_omaha_hand(hole_cards: &[u8], board_ps: &[OmahaBoardState; 10]) -> i32 {
+    let combos = hole_combos(hole_cards.len());
     let mut best_rank = i32::MIN;
-
-    // Select combination table based on hand size
-    let hole_combos: &[[usize; 2]] = match hole_cards.len() {
-        4 => &HOLE_COMBOS_2_FROM_4,
-        5 => &HOLE_COMBOS_2_FROM_5,
-        6 => &HOLE_COMBOS_2_FROM_6,
-        _ => panic!("Invalid Omaha hand size: {}", hole_cards.len()),
-    };
-
-    // For each of the 10 board subsets, continue the evaluation from the
-    // precomputed board state with each 2-card hole combination.
-    for &board_p in board_ps.iter() {
-        for &[h1, h2] in hole_combos.iter() {
-            let hole_pair = [hole_cards[h1], hole_cards[h2]];
-            let combined_p = fast_eval(ranks_data, &hole_pair, board_p);
-            let rank = final_p(ranks_data, combined_p as usize) as i32;
-            best_rank = best_rank.max(rank);
-        }
+    for board_p in board_ps {
+        best_rank = best_rank.max(board_p.best_over_holes(hole_cards, combos));
     }
-
     best_rank
 }
 
@@ -106,25 +86,6 @@ fn hole_combos(hand_size: usize) -> &'static [[usize; 2]] {
     }
 }
 
-/// Best 5-card rank achievable by completing a 3-card board state (`board_p`)
-/// with every legal 2-card hole combination. This is the per-board-subset inner
-/// max that all the sharing below is built on.
-#[inline]
-fn best_over_holes(
-    ranks_data: &[i32],
-    board_p: usize,
-    hole_cards: &[u8],
-    combos: &[[usize; 2]],
-) -> i32 {
-    let mut best = i32::MIN;
-    for &[a, b] in combos {
-        let combined_p = fast_eval(ranks_data, &[hole_cards[a], hole_cards[b]], board_p);
-        let rank = final_p(ranks_data, combined_p as usize) as i32;
-        best = best.max(rank);
-    }
-    best
-}
-
 /// Flop-shared Omaha evaluator.
 ///
 /// On a fixed flop, the 10 three-card board subsets split by how they use the
@@ -137,11 +98,10 @@ fn best_over_holes(
 /// `max(a, d[t], d[r], best over the 3 type-2 subsets)`, and only the last term
 /// is recomputed per runout. The type-2 board states are board-only, so they're
 /// shared across the hero and the whole villain range.
-struct OmahaFlopEval<'a> {
-    ranks: &'a [i32],
+struct OmahaFlopEval {
     combos: &'static [[usize; 2]],
     /// Board state after each single flop card (for the type-2 subsets).
-    oneflop_p: [usize; 3],
+    oneflop_p: [OmahaBoardState; 3],
     hero_a: i32,
     hero_d: [i32; 52],
     /// Per-villain type-0 scalar and type-1 table (`m` rows of 52).
@@ -149,34 +109,30 @@ struct OmahaFlopEval<'a> {
     villain_d: Vec<i32>,
 }
 
-impl<'a> OmahaFlopEval<'a> {
-    fn build(
-        ranks: &'a [i32],
-        hero_hand: &[u8],
-        vs_range: &OmahaRange,
-        flop: &[u8; 3],
-    ) -> Self {
+impl OmahaFlopEval {
+    fn build(hero_hand: &[u8], vs_range: &OmahaRange, flop: &[u8; 3]) -> Self {
         let combos = hole_combos(hero_hand.len());
 
         // Board-only partial states (shared by hero and every villain).
-        let flop_p = fast_eval(ranks, flop, 53) as usize; // type-0: all three flop cards
+        let flop_p = OmahaBoardState::from_cards(flop); // type-0: all three flop cards
         let twoflop_pairs = [[flop[0], flop[1]], [flop[0], flop[2]], [flop[1], flop[2]]];
-        let twoflop_p: [usize; 3] =
-            std::array::from_fn(|i| fast_eval(ranks, &twoflop_pairs[i], 53) as usize);
-        let oneflop_p: [usize; 3] =
-            std::array::from_fn(|i| next_p(ranks, 53 + flop[i] as usize) as usize);
+        let twoflop_p: [OmahaBoardState; 3] =
+            std::array::from_fn(|i| OmahaBoardState::from_cards(&twoflop_pairs[i]));
+        let oneflop_p: [OmahaBoardState; 3] =
+            std::array::from_fn(|i| OmahaBoardState::from_cards(&[flop[i]]));
 
         let flop_mask = cards_to_mask(flop);
 
         // type-1 board states bs1[pair][X] = state after {2 flop cards, X}, for
         // every card X not on the flop. Board-only, so shared across all actors.
-        let mut bs1 = [[0usize; 52]; 3];
+        let empty = OmahaBoardState::from_cards(&[]);
+        let mut bs1 = [[empty; 52]; 3];
         for (p, &base) in twoflop_p.iter().enumerate() {
             for x in 0..52usize {
                 if flop_mask & (1u64 << x) != 0 {
                     continue;
                 }
-                bs1[p][x] = next_p(ranks, base + x) as usize;
+                bs1[p][x] = base.add_card(x as u8);
             }
         }
 
@@ -185,14 +141,14 @@ impl<'a> OmahaFlopEval<'a> {
         // the natural form here.
         #[allow(clippy::needless_range_loop)]
         let fill = |hole: &[u8], a: &mut i32, d: &mut [i32]| {
-            *a = best_over_holes(ranks, flop_p, hole, combos);
+            *a = flop_p.best_over_holes(hole, combos);
             for x in 0..52usize {
                 if flop_mask & (1u64 << x) != 0 {
                     continue;
                 }
                 let mut best = i32::MIN;
                 for p in 0..3 {
-                    best = best.max(best_over_holes(ranks, bs1[p][x], hole, combos));
+                    best = best.max(bs1[p][x].best_over_holes(hole, combos));
                 }
                 d[x] = best;
             }
@@ -212,7 +168,6 @@ impl<'a> OmahaFlopEval<'a> {
         }
 
         OmahaFlopEval {
-            ranks,
             combos,
             oneflop_p,
             hero_a,
@@ -226,10 +181,10 @@ impl<'a> OmahaFlopEval<'a> {
     /// turn+river (the only part not precomputed). Combined with the cached
     /// `a`/`d[t]`/`d[r]` by the caller.
     #[inline]
-    fn type2_best(&self, hole: &[u8], board3: &[usize; 3]) -> i32 {
+    fn type2_best(&self, hole: &[u8], board3: &[OmahaBoardState; 3]) -> i32 {
         let mut e = i32::MIN;
-        for &bp in board3 {
-            e = e.max(best_over_holes(self.ranks, bp, hole, self.combos));
+        for bp in board3 {
+            e = e.max(bp.best_over_holes(hole, self.combos));
         }
         e
     }
@@ -247,10 +202,8 @@ impl<'a> OmahaFlopEval<'a> {
         let r = river as usize;
 
         // type-2 board states {one flop card, turn, river}: board-only, shared.
-        let board3: [usize; 3] = std::array::from_fn(|i| {
-            let after_turn = next_p(self.ranks, self.oneflop_p[i] + t) as usize;
-            next_p(self.ranks, after_turn + r) as usize
-        });
+        let board3: [OmahaBoardState; 3] =
+            std::array::from_fn(|i| self.oneflop_p[i].add_card(turn).add_card(river));
 
         let hero_e = self.type2_best(hero_hand, &board3);
         let hero_rank = self
@@ -259,8 +212,7 @@ impl<'a> OmahaFlopEval<'a> {
             .max(self.hero_d[r])
             .max(hero_e);
 
-        let dead_mask =
-            cards_to_mask(hero_hand) | cards_to_mask(flop) | (1u64 << t) | (1u64 << r);
+        let dead_mask = cards_to_mask(hero_hand) | cards_to_mask(flop) | (1u64 << t) | (1u64 << r);
 
         let (mut win, mut tie, mut lose) = (0.0f32, 0.0f32, 0.0f32);
         for (v, (hole, weight, mask)) in vs_range.iter_masked().enumerate() {
@@ -299,21 +251,19 @@ fn cards_to_mask(cards: &[u8]) -> u64 {
 
 /// Calculate equity for a single Omaha hand vs a range on a complete 5-card board
 pub fn calculate_omaha_leaf_equity(
-    ranks_data: &[i32],
     hero_hand: &[u8],
     vs_range: &OmahaRange,
     board: &[u8; 5],
 ) -> RunoutEquities {
     // Precompute the 10 board-subset states once; reused for hero and every villain.
-    let board_ps = compute_board_ps(ranks_data, board);
+    let board_ps = compute_board_ps(board);
 
     // Evaluate hero's hand
-    let hero_rank = eval_omaha_hand(ranks_data, hero_hand, &board_ps);
+    let hero_rank = eval_omaha_hand(hero_hand, &board_ps);
 
     // Cards unavailable to villains: hero's hole cards plus the board.
     let dead_mask = cards_to_mask(hero_hand) | cards_to_mask(board);
 
-    // Calculate equity vs range
     let mut win_weight = 0.0;
     let mut tie_weight = 0.0;
     let mut lose_weight = 0.0;
@@ -321,10 +271,10 @@ pub fn calculate_omaha_leaf_equity(
     for (villain_hand, weight, villain_mask) in vs_range.iter_masked() {
         // Card removal/blocking: a single AND against the dead cards.
         if villain_mask & dead_mask != 0 {
-            continue;  // This villain combo is impossible
+            continue; // This villain combo is impossible
         }
 
-        let villain_rank = eval_omaha_hand(ranks_data, villain_hand, &board_ps);
+        let villain_rank = eval_omaha_hand(villain_hand, &board_ps);
 
         if hero_rank > villain_rank {
             win_weight += weight;
@@ -436,39 +386,6 @@ impl SubsetSlots {
     }
 }
 
-/// Per board-subset state after adding a single hole card, for every card. This is
-/// board-only, so it's built once and shared by the hero and the whole villain
-/// range; indexing it turns each 2-hole-card evaluation into two table loads
-/// (one `next_p` for the second card + one `final_p`) instead of three.
-fn compute_board_s1(ranks: &[i32], board_ps: &[usize; 10]) -> [[u32; 52]; 10] {
-    let mut s1 = [[0u32; 52]; 10];
-    for (sub, &bp) in board_ps.iter().enumerate() {
-        for (card, slot) in s1[sub].iter_mut().enumerate() {
-            *slot = next_p(ranks, bp + card);
-        }
-    }
-    s1
-}
-
-/// Best 5-card rank over every legal 2-hole-card combination, using the shared
-/// single-card continuation table. Equivalent to [`eval_omaha_hand`] but cheaper.
-#[inline]
-fn eval_omaha_hand_s1(
-    ranks: &[i32],
-    hole: &[u8],
-    s1: &[[u32; 52]; 10],
-    combos: &'static [[usize; 2]],
-) -> i32 {
-    let mut best = i32::MIN;
-    for row in s1.iter() {
-        for &[a, b] in combos {
-            let combined = next_p(ranks, row[hole[a] as usize] as usize + hole[b] as usize);
-            best = best.max(final_p(ranks, combined as usize) as i32);
-        }
-    }
-    best
-}
-
 /// Equity of every hand in a hero **range** vs a villain range on a fixed 5-card
 /// board (results aligned to `hero_range` order).
 ///
@@ -490,19 +407,20 @@ fn eval_omaha_hand_s1(
 /// `stride` — no per-hand `Vec`. Hero subsets that no villain has are mapped to a
 /// trailing always-zero `sentinel` slot so the inner IE loop stays branch-free.
 pub fn calculate_omaha_leaf_equity_range(
-    ranks_data: &[i32],
     hero_range: &OmahaRange,
     vs_range: &OmahaRange,
     board: &[u8; 5],
 ) -> Vec<Equity> {
     let board_mask = cards_to_mask(board);
-    let board_ps = compute_board_ps(ranks_data, board);
-    let s1 = compute_board_s1(ranks_data, &board_ps);
+    let board_ps = compute_board_ps(board);
 
     let k = vs_range.hand_size();
-    debug_assert_eq!(k, hero_range.hand_size(), "hero/villain hand sizes must match");
+    debug_assert_eq!(
+        k,
+        hero_range.hand_size(),
+        "hero/villain hand sizes must match"
+    );
     let stride = (1usize << k) - 1; // non-empty subsets of a board-disjoint k-card hand
-    let combos = hole_combos(k);
 
     // --- Villains: evaluate once; give every distinct subset a dense slot. ---
     let m = vs_range.len();
@@ -522,7 +440,7 @@ pub fn calculate_omaha_leaf_equity_range(
         if mask & board_mask != 0 {
             continue; // villain shares a board card -> impossible on this board
         }
-        let rank = eval_omaha_hand_s1(ranks_data, hand, &s1, combos);
+        let rank = eval_omaha_hand(hand, &board_ps);
         let off = villain_slots.len() as u32;
         let mut s = mask;
         while s != 0 {
@@ -558,7 +476,7 @@ pub fn calculate_omaha_leaf_equity_range(
             hero_terms.resize(hero_terms.len() + stride, (sentinel, 0.0));
             continue;
         }
-        hero_rank[hi] = eval_omaha_hand_s1(ranks_data, hand, &s1, combos);
+        hero_rank[hi] = eval_omaha_hand(hand, &board_ps);
         let mut s = mask;
         while s != 0 {
             let slot = map.get(s).unwrap_or(sentinel);
@@ -642,7 +560,6 @@ pub fn calculate_omaha_leaf_equity_range(
 
 /// Enumerate all river runouts from a turn (4-card board)
 fn calculate_omaha_equity_from_turn(
-    ranks_data: &[i32],
     hero_hand: &[u8],
     vs_range: &OmahaRange,
     board: &[u8; 4],
@@ -650,25 +567,16 @@ fn calculate_omaha_equity_from_turn(
     let used_mask = cards_to_mask(board) | cards_to_mask(hero_hand);
     let mut results = Vec::with_capacity(44);
 
-    // Enumerate all river cards
     for river in 0..52u8 {
         if (used_mask & (1u64 << river)) != 0 {
             continue;
         }
-
-        let full_board = [
-            board[0], board[1], board[2], board[3],
-            river
-        ];
-
-        let equity_result = calculate_omaha_leaf_equity(
-            ranks_data,
+        let full_board = [board[0], board[1], board[2], board[3], river];
+        results.push(calculate_omaha_leaf_equity(
             hero_hand,
             vs_range,
-            &full_board
-        );
-
-        results.push(equity_result);
+            &full_board,
+        ));
     }
 
     results
@@ -676,7 +584,6 @@ fn calculate_omaha_equity_from_turn(
 
 /// Enumerate all turn and river runouts from a flop (3-card board)
 fn calculate_omaha_equity_from_flop(
-    ranks_data: &[i32],
     hero_hand: &[u8],
     vs_range: &OmahaRange,
     board: &[u8; 3],
@@ -688,7 +595,7 @@ fn calculate_omaha_equity_from_flop(
     // Build the flop-shared evaluator once; every runout reuses its precomputed
     // board-subset tables and only re-evaluates the subsets that use both the turn
     // and the river.
-    let eval = OmahaFlopEval::build(ranks_data, hero_hand, vs_range, board);
+    let eval = OmahaFlopEval::build(hero_hand, vs_range, board);
 
     for turn in 0..52u8 {
         if (used_mask & (1u64 << turn)) != 0 {
@@ -712,14 +619,16 @@ fn calculate_omaha_equity_from_flop(
 /// Calculate Omaha equity vs range with board enumeration
 /// Returns equity for each possible runout
 pub fn calculate_omaha_equity_vs_range(
-    ranks_data: &[i32],
     hero_hand: &[u8],
     vs_range: &OmahaRange,
     board: &[u8],
 ) -> Result<Vec<RunoutEquities>, String> {
     // Validate hand size
     if ![4, 5, 6].contains(&hero_hand.len()) {
-        return Err(format!("Omaha hand must be 4, 5, or 6 cards, got {}", hero_hand.len()));
+        return Err(format!(
+            "Omaha hand must be 4, 5, or 6 cards, got {}",
+            hero_hand.len()
+        ));
     }
 
     // Validate range matches hero hand size
@@ -734,17 +643,29 @@ pub fn calculate_omaha_equity_vs_range(
     match board.len() {
         3 => {
             let board_cards = [board[0], board[1], board[2]];
-            Ok(calculate_omaha_equity_from_flop(ranks_data, hero_hand, vs_range, &board_cards))
+            Ok(calculate_omaha_equity_from_flop(
+                hero_hand,
+                vs_range,
+                &board_cards,
+            ))
         }
         4 => {
             let board_cards = [board[0], board[1], board[2], board[3]];
-            Ok(calculate_omaha_equity_from_turn(ranks_data, hero_hand, vs_range, &board_cards))
+            Ok(calculate_omaha_equity_from_turn(
+                hero_hand,
+                vs_range,
+                &board_cards,
+            ))
         }
         5 => {
             let board_cards = [board[0], board[1], board[2], board[3], board[4]];
-            Ok(vec![calculate_omaha_leaf_equity(ranks_data, hero_hand, vs_range, &board_cards)])
+            Ok(vec![calculate_omaha_leaf_equity(
+                hero_hand,
+                vs_range,
+                &board_cards,
+            )])
         }
-        _ => Err("Board must be 3, 4, or 5 cards".to_string())
+        _ => Err("Board must be 3, 4, or 5 cards".to_string()),
     }
 }
 
@@ -773,7 +694,6 @@ fn sample_two_cards(available: &[u8], rng: &mut impl Rng) -> Option<[u8; 2]> {
 /// Samples `num_runouts` random turn and river combinations
 /// Returns equity for each sampled runout
 pub fn calculate_omaha_equity_monte_carlo_flop(
-    ranks_data: &[i32],
     hero_hand: &[u8],
     vs_range: &OmahaRange,
     flop: &[u8; 3],
@@ -793,7 +713,7 @@ pub fn calculate_omaha_equity_monte_carlo_flop(
     // it. Below that crossover (few samples, large range) the per-leaf path is
     // cheaper, so gate on sampling at least as many runouts as live cards.
     if num_runouts >= available.len() {
-        let eval = OmahaFlopEval::build(ranks_data, hero_hand, vs_range, flop);
+        let eval = OmahaFlopEval::build(hero_hand, vs_range, flop);
         for _ in 0..num_runouts {
             if let Some([turn, river]) = sample_two_cards(&available, &mut rng) {
                 results.push(eval.equity_for_runout(hero_hand, vs_range, flop, turn, river));
@@ -804,7 +724,9 @@ pub fn calculate_omaha_equity_monte_carlo_flop(
             if let Some([turn, river]) = sample_two_cards(&available, &mut rng) {
                 let full_board = [flop[0], flop[1], flop[2], turn, river];
                 results.push(calculate_omaha_leaf_equity(
-                    ranks_data, hero_hand, vs_range, &full_board,
+                    hero_hand,
+                    vs_range,
+                    &full_board,
                 ));
             }
         }
@@ -820,7 +742,6 @@ pub fn calculate_omaha_equity_monte_carlo_flop(
 /// each hero's win/tie/lose is the sum of its per-runout villain weight (ratios
 /// are meaningful; absolute magnitude scales with the runout count).
 pub fn calculate_omaha_range_equity(
-    ranks_data: &[i32],
     hero_range: &OmahaRange,
     vs_range: &OmahaRange,
     board: &[u8],
@@ -847,9 +768,9 @@ pub fn calculate_omaha_range_equity(
         let runouts = match (board.len(), max_runouts) {
             (3, Some(n)) => {
                 let flop = [board[0], board[1], board[2]];
-                calculate_omaha_equity_monte_carlo_flop(ranks_data, &hero_hand, vs_range, &flop, n)
+                calculate_omaha_equity_monte_carlo_flop(&hero_hand, vs_range, &flop, n)
             }
-            _ => calculate_omaha_equity_vs_range(ranks_data, &hero_hand, vs_range, board)?,
+            _ => calculate_omaha_equity_vs_range(&hero_hand, vs_range, board)?,
         };
         for r in &runouts {
             agg[0].win += r.equity.win;
@@ -859,10 +780,9 @@ pub fn calculate_omaha_range_equity(
     } else {
         // A hero range uses the sorted + inclusion-exclusion primitive per runout.
         let accumulate = |board5: &[u8; 5], agg: &mut [Equity]| {
-            for (a, e) in agg
-                .iter_mut()
-                .zip(calculate_omaha_leaf_equity_range(ranks_data, hero_range, vs_range, board5))
-            {
+            for (a, e) in agg.iter_mut().zip(calculate_omaha_leaf_equity_range(
+                hero_range, vs_range, board5,
+            )) {
                 a.win += e.win;
                 a.tie += e.tie;
                 a.lose += e.lose;
@@ -924,26 +844,11 @@ mod tests {
     use super::*;
     use rand::Rng;
 
-    /// Load the real rank table once for the parity tests.
-    fn load_ranks() -> Vec<i32> {
-        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/HandRanks.dat"))
-            .expect("HandRanks.dat must exist at the crate root for tests");
-        bytes
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()
-    }
-
     /// Independent, minimal reimplementation of leaf equity: a plain per-villain
     /// loop with a straightforward bit-by-bit card overlap check, deliberately not
     /// sharing the production helpers' structure. A correct
     /// `calculate_omaha_leaf_equity` must produce bit-identical results.
-    fn reference_leaf(
-        ranks: &[i32],
-        hero: &[u8],
-        range: &OmahaRange,
-        board: &[u8; 5],
-    ) -> (f32, f32, f32) {
+    fn reference_leaf(hero: &[u8], range: &OmahaRange, board: &[u8; 5]) -> (f32, f32, f32) {
         // Build the dead-card set one bit at a time (no shared mask helper).
         let mut dead = 0u64;
         for &c in hero {
@@ -953,14 +858,14 @@ mod tests {
             dead |= 1u64 << c;
         }
 
-        let board_ps = compute_board_ps(ranks, board);
-        let hero_rank = eval_omaha_hand(ranks, hero, &board_ps);
+        let board_ps = compute_board_ps(board);
+        let hero_rank = eval_omaha_hand(hero, &board_ps);
         let (mut w, mut t, mut l) = (0.0f32, 0.0f32, 0.0f32);
         for (vh, weight) in range.iter() {
             if vh.iter().any(|&c| dead & (1u64 << c) != 0) {
                 continue;
             }
-            let vr = eval_omaha_hand(ranks, vh, &board_ps);
+            let vr = eval_omaha_hand(vh, &board_ps);
             if hero_rank > vr {
                 w += weight;
             } else if hero_rank == vr {
@@ -993,7 +898,6 @@ mod tests {
     /// across many random scenarios.
     #[test]
     fn leaf_equity_matches_reference() {
-        let ranks = load_ranks();
         let mut rng = rand::rng();
 
         for _ in 0..200 {
@@ -1024,8 +928,8 @@ mod tests {
                 range.add_hand(&vh, weight);
             }
 
-            let got = calculate_omaha_leaf_equity(&ranks, &hero, &range, &board);
-            let (w, t, l) = reference_leaf(&ranks, &hero, &range, &board);
+            let got = calculate_omaha_leaf_equity(&hero, &range, &board);
+            let (w, t, l) = reference_leaf(&hero, &range, &board);
 
             assert_eq!(got.equity.win, w, "win mismatch");
             assert_eq!(got.equity.tie, t, "tie mismatch");
@@ -1035,12 +939,15 @@ mod tests {
 
     /// The flop-shared evaluator must produce bit-identical results to calling
     /// the trusted single-leaf path on each enumerated runout.
+    ///
+    /// This re-derives a full per-leaf reference for every one of the ~1980
+    /// runouts, so the scenario count and range size are kept modest — the goal
+    /// is to validate the shared-vs-per-leaf invariant, not to stress throughput.
     #[test]
     fn flop_enumeration_matches_per_leaf() {
-        let ranks = load_ranks();
         let mut rng = rand::rng();
 
-        for _ in 0..20 {
+        for _ in 0..4 {
             // Random distinct flop + hero.
             let mut used = 0u64;
             let mut flop = [0u8; 3];
@@ -1058,18 +965,17 @@ mod tests {
             used |= hero_mask;
 
             let mut range = OmahaRange::new(4);
-            for _ in 0..120 {
+            for _ in 0..40 {
                 let base_used = if rng.random_bool(0.5) { used } else { 0 };
                 let (vh, _) = random_plo4(base_used, &mut rng);
                 let weight: f32 = rng.random_range(0.1..1.0);
                 range.add_hand(&vh, weight);
             }
 
-            let shared = calculate_omaha_equity_from_flop(&ranks, &hero, &range, &flop);
+            let shared = calculate_omaha_equity_from_flop(&hero, &range, &flop);
             assert!(!shared.is_empty());
             for runout in &shared {
-                let expected =
-                    calculate_omaha_leaf_equity(&ranks, &hero, &range, &runout.board);
+                let expected = calculate_omaha_leaf_equity(&hero, &range, &runout.board);
                 assert_eq!(runout.equity, expected.equity, "board {:?}", runout.board);
             }
         }
@@ -1080,7 +986,6 @@ mod tests {
     /// weights in a different order than the direct loop).
     #[test]
     fn range_equity_matches_per_hero() {
-        let ranks = load_ranks();
         let mut rng = rand::rng();
         let mut max_err = 0.0f32;
 
@@ -1112,11 +1017,11 @@ mod tests {
                 vs_range.add_hand(&v, rng.random_range(0.1..1.0));
             }
 
-            let got = calculate_omaha_leaf_equity_range(&ranks, &hero_range, &vs_range, &board);
+            let got = calculate_omaha_leaf_equity_range(&hero_range, &vs_range, &board);
 
             for (hi, (hand, _w)) in hero_range.iter().enumerate() {
                 let h: Vec<u8> = hand.to_vec();
-                let expect = calculate_omaha_leaf_equity(&ranks, &h, &vs_range, &board);
+                let expect = calculate_omaha_leaf_equity(&h, &vs_range, &board);
                 let mut chk = |a: f32, b: f32, label: &str| {
                     let err = (a - b).abs();
                     if err > max_err {
@@ -1139,7 +1044,6 @@ mod tests {
     /// with summing the single-hero engine over the same runouts, for every hero.
     #[test]
     fn range_equity_enumeration_matches_single_hero() {
-        let ranks = load_ranks();
         let mut rng = rand::rng();
         let mut max_err = 0.0f32;
 
@@ -1170,14 +1074,12 @@ mod tests {
                 }
 
                 let got =
-                    calculate_omaha_range_equity(&ranks, &hero_range, &vs_range, &board, None)
-                        .unwrap();
+                    calculate_omaha_range_equity(&hero_range, &vs_range, &board, None).unwrap();
 
                 for res in &got {
                     // Sum the single-hero engine over the same runouts as the oracle.
                     let runouts =
-                        calculate_omaha_equity_vs_range(&ranks, &res.hand, &vs_range, &board)
-                            .unwrap();
+                        calculate_omaha_equity_vs_range(&res.hand, &vs_range, &board).unwrap();
                     let (mut w, mut t, mut l) = (0.0f32, 0.0f32, 0.0f32);
                     for r in &runouts {
                         w += r.equity.win;

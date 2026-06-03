@@ -74,7 +74,10 @@ impl OmahaRange {
     /// Returns only the valid portion of each hand based on hand_size
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], f32)> + '_ {
         let hand_size = self.hand_size;
-        self.hands.iter().map(move |h| &h[..hand_size]).zip(self.weights.iter().copied())
+        self.hands
+            .iter()
+            .map(move |h| &h[..hand_size])
+            .zip(self.weights.iter().copied())
     }
 
     /// Iterator over (hand slice, weight, precomputed card mask) triples.
