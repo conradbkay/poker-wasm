@@ -23,12 +23,12 @@ impl HoldemRange {
         Self::default()
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getRange)]
     pub fn get_range(&self) -> Vec<f32> {
         self.range.clone()
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getWeight)]
     pub fn get_weight(&self, idx: usize) -> f32 {
         if idx < self.range.len() {
             self.range[idx]
@@ -44,7 +44,7 @@ impl HoldemRange {
         }
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = setHand)]
     pub fn set_hand(&mut self, hand: &[u8], weight: f32) -> Result<(), String> {
         if hand.len() != 2 {
             return Err("Hand must contain exactly 2 cards".to_string());
@@ -62,12 +62,12 @@ impl HoldemRange {
         Ok(())
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = fromHandIdx)]
     pub fn from_hand_idx_wasm(idx: usize) -> Vec<u8> {
         Self::from_hand_idx(idx).to_vec()
     }
 
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = getHandIdx)]
     pub fn get_hand_idx_wasm(hand: Vec<u8>) -> usize {
         let mut hand_array = [0; 2];
         hand_array.copy_from_slice(&hand[..2]);

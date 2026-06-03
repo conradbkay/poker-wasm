@@ -4,8 +4,6 @@ import {
   OmahaRange
 } from "../../pkg/poker_wasm.js"
 // import { HoldemRange, EquityCalculator } from "poker-wasm"
-import fs from "fs"
-import path from "path"
 import { formatCards } from "poker-utils"
 
 function createFullRange() {
@@ -18,10 +16,7 @@ function createFullRange() {
 
 async function main() {
   try {
-    const handRanksPath = path.join(__dirname, "..", "..", "HandRanks.dat")
-    const handRanksData = fs.readFileSync(handRanksPath)
-
-    const calculator = new EquityCalculator(handRanksData)
+    const calculator = new EquityCalculator()
 
     const board = [0, 6, 12, 19, 43]
     const vsRange = createFullRange()
@@ -30,7 +25,7 @@ async function main() {
     calculator.setHeroRange(myRange)
     calculator.setVsRange(vsRange)
 
-    const equityResults = calculator.equity_vs_range(new Uint8Array(board))
+    const equityResults = calculator.equityVsRange(new Uint8Array(board))
 
     console.log(
       `Equity calculation completed with ${

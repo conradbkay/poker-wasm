@@ -8,6 +8,23 @@
 
 use holdem_hand_evaluator::Hand;
 
+/// Rank of the best 5-card Hold'em hand from `hole` (2 cards) + `board` (3–5
+/// cards). Higher is stronger; the value is only meaningful relative to other
+/// ranks from this evaluator (e.g. to decide which of two hands wins on the same
+/// board). For ranking many hands on one board, prefer [`gen_board_eval_holdem_hhe`]
+/// so the board is only built once.
+#[inline]
+pub fn holdem_hand_rank(hole: &[u8], board: &[u8]) -> i32 {
+    let mut h = Hand::new();
+    for &c in board {
+        h = h.add_card(c as usize);
+    }
+    for &c in hole {
+        h = h.add_card(c as usize);
+    }
+    h.evaluate() as i32
+}
+
 /// Builds a Hold'em board evaluator: the 5-card board state is built once, then
 /// each 2-card combo is folded in and ranked.
 #[inline]

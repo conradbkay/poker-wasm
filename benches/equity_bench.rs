@@ -86,13 +86,12 @@ fn create_random_omaha_range(
 // --- Hold'em Benchmarks ---
 
 fn bench_holdem_leaf_equity(c: &mut Criterion) {
-    let hand_sizes = vec![25, 50, 100, 250, 500, 1000];
-    let hand_ranks_data = include_bytes!("../HandRanks.dat").to_vec();
+    let hand_sizes = vec![25, 50, 100, 250, 500, 1000, 1326];
     let mut group = c.benchmark_group("holdem_leaf_equity");
 
     for &hand_size in &hand_sizes {
         let board = create_random_board(5, 0xB0A12 + hand_size as u64);
-        let mut calculator = EquityCalculator::new(hand_ranks_data.clone());
+        let mut calculator = EquityCalculator::new();
         calculator.set_hero_range(create_random_range(
             hand_size,
             &board,

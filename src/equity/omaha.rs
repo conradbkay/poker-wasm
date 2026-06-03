@@ -249,6 +249,15 @@ fn cards_to_mask(cards: &[u8]) -> u64 {
     mask
 }
 
+/// Rank of the best Omaha hand on a complete 5-card `board`, using exactly 2 of
+/// the `hole` cards and 3 of the board (PLO4/5/6: `hole` is 4, 5, or 6 cards).
+/// Higher is stronger; the value is only meaningful relative to other ranks from
+/// this evaluator (e.g. to decide which of two hands wins on the same board).
+pub fn omaha_hand_rank(hole: &[u8], board: &[u8; 5]) -> i32 {
+    let board_ps = compute_board_ps(board);
+    eval_omaha_hand(hole, &board_ps)
+}
+
 /// Calculate equity for a single Omaha hand vs a range on a complete 5-card board
 pub fn calculate_omaha_leaf_equity(
     hero_hand: &[u8],

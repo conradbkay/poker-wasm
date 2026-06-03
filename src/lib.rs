@@ -23,10 +23,11 @@ pub struct EquityCalculator {
 
 #[wasm_bindgen]
 impl EquityCalculator {
-    /// `data` is accepted for compatibility with older JS callers. Hold'em no
-    /// longer needs a 2+2 rank table.
+    /// The evaluator is tableless (lookup tables are baked into the wasm binary),
+    /// so no data needs to be passed in.
+    #[allow(clippy::new_without_default)]
     #[wasm_bindgen(constructor)]
-    pub fn new(_data: Vec<u8>) -> Self {
+    pub fn new() -> Self {
         EquityCalculator {
             cached_hero_range: None,
             cached_vs_range: None,
@@ -66,7 +67,7 @@ impl EquityCalculator {
     /// Calculate equity for each hand in hero_range vs vs_range
     /// Enumerates all possible runouts for incomplete boards (3 or 4 cards)
     /// IMPORTANT: Call setHeroRange and setVsRange before using this method
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = equityVsRange)]
     pub fn equity_vs_range(&self, board: &[u8]) -> Result<Vec<EquityResult>, String> {
         let hero_range = self
             .cached_hero_range
@@ -138,7 +139,7 @@ impl EquityResult {
         self.equity
     }
 
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter, js_name = handIdx)]
     pub fn hand_idx(&self) -> usize {
         self.hand_idx
     }
