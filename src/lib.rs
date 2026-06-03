@@ -103,6 +103,55 @@ impl EquityCalculator {
 
         equity::omaha::calculate_omaha_range_equity(hero_range, vs_range, board, max_runouts)
     }
+
+    /// Per-runout equity for one Omaha hero hand vs the cached villain range.
+    /// For a turn board this enumerates every legal river. For a flop board,
+    /// `maxRunouts` samples that many turn/river runouts; omit it to enumerate.
+    /// Pass `seed` to make sampled flop boards deterministic.
+    /// IMPORTANT: Call setOmahaVsRange before using this.
+    #[wasm_bindgen(js_name = omahaRunoutEquityVsRange)]
+    pub fn omaha_runout_equity_vs_range(
+        &self,
+        hero_hand: &[u8],
+        board: &[u8],
+        max_runouts: Option<usize>,
+        seed: Option<u32>,
+    ) -> Result<Vec<RunoutEquities>, String> {
+        let vs_range = self
+            .cached_omaha_vs_range
+            .as_ref()
+            .ok_or("No Omaha villain range set. Call setOmahaVsRange first.")?;
+
+        equity::omaha::calculate_omaha_runout_equity_vs_range(
+            hero_hand,
+            vs_range,
+            board,
+            max_runouts,
+            seed.map(u64::from),
+        )
+    }
+
+    /// Per-runout win/tie/lose weights for one Omaha hero hand vs the cached
+    /// villain range. The output is a flat `[win, tie, lose, ...]` array, one
+    /// triple per runout. Pass `seed` to make sampled flop boards deterministic.
+    /// IMPORTANT: Call setOmahaVsRange before using this.
+    #[wasm_bindgen(js_name = omahaRunoutEquities)]
+    pub fn omaha_runout_equities(
+        &self,
+        hero_hand: &[u8],
+        board: &[u8],
+        max_runouts: Option<usize>,
+        seed: Option<u32>,
+    ) -> Result<Vec<f32>, String> {
+        let runouts = self.omaha_runout_equity_vs_range(hero_hand, board, max_runouts, seed)?;
+        let mut out = Vec::with_capacity(runouts.len() * 3);
+        for runout in runouts {
+            out.push(runout.equity.win);
+            out.push(runout.equity.tie);
+            out.push(runout.equity.lose);
+        }
+        Ok(out)
+    }
 }
 
 // --- WASM Bindings for Types ---

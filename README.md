@@ -2,7 +2,7 @@
 
 Hold'em range vs range equity calculation in 11 µs or less
 
-^Omaha in ~390 µs for 2000 vs 2000 random hands. Supports PLO5 (~2x runtime) and PLO6 (~4x)
+^Omaha in ~390 µs for 2000 vs 2000 random hands. Supports PLO5 and PLO6
 
 ## Usage
 
@@ -50,7 +50,7 @@ results.forEach(({ combo, equity }) => {
 })
 ```
 
-### Omaha (PLO) Range vs Range Equity
+### Omaha (PLO) Aggregate Range Equity
 
 Calculate PLO equity for a hero range vs a villain range. The board may be 3, 4,
 or 5 cards; incomplete boards are enumerated. On a flop, passing `maxRunouts`
@@ -79,4 +79,27 @@ const flop = new Uint8Array([0, 1, 2]) // 2s 2h 2d
 // Pass 1000 to Monte Carlo sample the turn/river instead of full enumeration.
 const results = calculator.omahaEquityVsRange(flop, 1000)
 // ^ same format/type as results from NLHE example
+```
+
+### Omaha (PLO) Per-Runout Equity
+
+For reports and equity-distribution features, use the per-runout API instead of
+the aggregate range API. It returns one result for each complete future board:
+all legal rivers on a turn board, all legal turn/river pairs on a flop board, or
+`maxRunouts` sampled turn/river pairs when requested.
+
+```ts
+const heroHand = new Uint8Array([35, 34, 31, 30])
+const turn = new Uint8Array([0, 1, 2, 10])
+
+calculator.setOmahaVsRange(vsRange)
+
+// Full results with board + win/tie/lose weights per river.
+const runouts = calculator.omahaRunoutEquityVsRange(heroHand, turn)
+
+// Faster weight-only form, flattened as [win, tie, lose, ...].
+const eqs = calculator.omahaRunoutEquities(heroHand, turn)
+
+// Seeded flop sampling for reproducible tests.
+const sampled = calculator.omahaRunoutEquities(heroHand, flop, 1000, 1234)
 ```

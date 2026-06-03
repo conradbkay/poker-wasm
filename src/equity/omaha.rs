@@ -7,7 +7,7 @@ use crate::evaluation::{
 use crate::range::OmahaRange;
 use crate::types::Equity;
 use holdem_hand_evaluator::Hand;
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use wasm_bindgen::prelude::*;
 
 /// Output structure for enumerated board runouts
@@ -158,10 +158,10 @@ impl OmahaFlopEval {
         // for both the bitmask skip and the `d`/`bs1` indexing, so a range loop is
         // the natural form here.
         #[allow(clippy::needless_range_loop)]
-        let fill = |pairs: &[Hand], a: &mut i32, d: &mut [i32]| {
+        let fill = |pairs: &[Hand], actor_mask: u64, a: &mut i32, d: &mut [i32]| {
             *a = flop_p.best_over_hole_pair_states(pairs);
             for x in 0..52usize {
-                if flop_mask & (1u64 << x) != 0 {
+                if (flop_mask | actor_mask) & (1u64 << x) != 0 {
                     continue;
                 }
                 let mut best = i32::MIN;
@@ -174,14 +174,22 @@ impl OmahaFlopEval {
 
         let mut hero_a = i32::MIN;
         let mut hero_d = [i32::MIN; 52];
-        fill(hero_pairs, &mut hero_a, &mut hero_d);
+        fill(
+            hero_pairs,
+            cards_to_mask(hero_hand),
+            &mut hero_a,
+            &mut hero_d,
+        );
 
         let m = vs_range.len();
         let mut villain_a = vec![i32::MIN; m];
         let mut villain_d = vec![i32::MIN; m * 52];
-        for (v, (_hole, _w, _mask, pairs)) in vs_range.iter_eval_ready().enumerate() {
+        for (v, (_hole, _w, mask, pairs)) in vs_range.iter_eval_ready().enumerate() {
+            if mask & flop_mask != 0 {
+                continue;
+            }
             let mut a = i32::MIN;
-            fill(pairs, &mut a, &mut villain_d[v * 52..v * 52 + 52]);
+            fill(pairs, mask, &mut a, &mut villain_d[v * 52..v * 52 + 52]);
             villain_a[v] = a;
         }
 
@@ -284,6 +292,15 @@ pub fn calculate_omaha_leaf_equity(
     vs_range: &OmahaRange,
     board: &[u8; 5],
 ) -> RunoutEquities {
+    let hero_mask = cards_to_mask(hero_hand);
+    let board_mask = cards_to_mask(board);
+    if hero_mask & board_mask != 0 {
+        return RunoutEquities {
+            board: *board,
+            equity: Equity::default(),
+        };
+    }
+
     // Precompute the 10 board-subset states once; reused for hero and every villain.
     let board_ps = compute_board_ps(board);
 
@@ -291,7 +308,7 @@ pub fn calculate_omaha_leaf_equity(
     let hero_rank = eval_omaha_hand(hero_hand, &board_ps);
 
     // Cards unavailable to villains: hero's hole cards plus the board.
-    let dead_mask = cards_to_mask(hero_hand) | cards_to_mask(board);
+    let dead_mask = hero_mask | board_mask;
 
     let mut win_weight = 0.0;
     let mut tie_weight = 0.0;
@@ -506,7 +523,12 @@ fn calculate_omaha_equity_from_turn(
     vs_range: &OmahaRange,
     board: &[u8; 4],
 ) -> Vec<RunoutEquities> {
-    let used_mask = cards_to_mask(board) | cards_to_mask(hero_hand);
+    let hero_mask = cards_to_mask(hero_hand);
+    let board_mask = cards_to_mask(board);
+    if hero_mask & board_mask != 0 {
+        return Vec::new();
+    }
+    let used_mask = board_mask | hero_mask;
     let mut results = Vec::with_capacity(44);
 
     for river in 0..52u8 {
@@ -530,7 +552,12 @@ fn calculate_omaha_equity_from_flop(
     vs_range: &OmahaRange,
     board: &[u8; 3],
 ) -> Vec<RunoutEquities> {
-    let used_mask = cards_to_mask(board) | cards_to_mask(hero_hand);
+    let hero_mask = cards_to_mask(hero_hand);
+    let board_mask = cards_to_mask(board);
+    if hero_mask & board_mask != 0 {
+        return Vec::new();
+    }
+    let used_mask = board_mask | hero_mask;
     // Pre-allocate: ~45 turn cards × ~44 river cards
     let mut results = Vec::with_capacity(1980);
 
@@ -558,12 +585,14 @@ fn calculate_omaha_equity_from_flop(
     results
 }
 
-/// Calculate Omaha equity vs range with board enumeration
-/// Returns equity for each possible runout
-pub fn calculate_omaha_equity_vs_range(
+/// Calculate Omaha equity vs range with board enumeration or flop sampling.
+/// Returns one equity result per complete board runout.
+pub fn calculate_omaha_runout_equity_vs_range(
     hero_hand: &[u8],
     vs_range: &OmahaRange,
     board: &[u8],
+    max_runouts: Option<usize>,
+    seed: Option<u64>,
 ) -> Result<Vec<RunoutEquities>, String> {
     // Validate hand size
     if ![4, 5, 6].contains(&hero_hand.len()) {
@@ -585,11 +614,25 @@ pub fn calculate_omaha_equity_vs_range(
     match board.len() {
         3 => {
             let board_cards = [board[0], board[1], board[2]];
-            Ok(calculate_omaha_equity_from_flop(
-                hero_hand,
-                vs_range,
-                &board_cards,
-            ))
+            Ok(match (max_runouts, seed) {
+                (Some(num_runouts), Some(seed)) => {
+                    let mut rng = StdRng::seed_from_u64(seed);
+                    calculate_omaha_equity_monte_carlo_flop_with_rng(
+                        hero_hand,
+                        vs_range,
+                        &board_cards,
+                        num_runouts,
+                        &mut rng,
+                    )
+                }
+                (Some(num_runouts), None) => calculate_omaha_equity_monte_carlo_flop(
+                    hero_hand,
+                    vs_range,
+                    &board_cards,
+                    num_runouts,
+                ),
+                (None, _) => calculate_omaha_equity_from_flop(hero_hand, vs_range, &board_cards),
+            })
         }
         4 => {
             let board_cards = [board[0], board[1], board[2], board[3]];
@@ -609,6 +652,16 @@ pub fn calculate_omaha_equity_vs_range(
         }
         _ => Err("Board must be 3, 4, or 5 cards".to_string()),
     }
+}
+
+/// Calculate Omaha equity vs range with complete board enumeration.
+/// Returns one equity result per complete board runout.
+pub fn calculate_omaha_equity_vs_range(
+    hero_hand: &[u8],
+    vs_range: &OmahaRange,
+    board: &[u8],
+) -> Result<Vec<RunoutEquities>, String> {
+    calculate_omaha_runout_equity_vs_range(hero_hand, vs_range, board, None, None)
 }
 
 /// Sample 2 distinct cards from a precomputed `available` list.
@@ -635,20 +688,25 @@ fn sample_two_cards(available: &[u8], rng: &mut impl Rng) -> Option<[u8; 2]> {
 /// Monte Carlo simulation for Omaha equity on the flop
 /// Samples `num_runouts` random turn and river combinations
 /// Returns equity for each sampled runout
-pub fn calculate_omaha_equity_monte_carlo_flop(
+fn calculate_omaha_equity_monte_carlo_flop_with_rng(
     hero_hand: &[u8],
     vs_range: &OmahaRange,
     flop: &[u8; 3],
     num_runouts: usize,
+    rng: &mut impl Rng,
 ) -> Vec<RunoutEquities> {
-    let used_mask = cards_to_mask(flop) | cards_to_mask(hero_hand);
+    let hero_mask = cards_to_mask(hero_hand);
+    let flop_mask = cards_to_mask(flop);
+    if hero_mask & flop_mask != 0 {
+        return Vec::new();
+    }
+    let used_mask = flop_mask | hero_mask;
     let mut results = Vec::with_capacity(num_runouts);
 
     // Build the available-card list and RNG once, outside the sampling loop.
     let available: Vec<u8> = (0..52u8)
         .filter(|&card| (used_mask & (1u64 << card)) == 0)
         .collect();
-    let mut rng = rand::rng();
 
     // The flop-shared evaluator precomputes the type-1 `D[X]` table over every
     // live card, which only pays off once enough runouts are sampled to amortize
@@ -657,13 +715,13 @@ pub fn calculate_omaha_equity_monte_carlo_flop(
     if num_runouts >= available.len() {
         let eval = OmahaFlopEval::build(hero_hand, vs_range, flop);
         for _ in 0..num_runouts {
-            if let Some([turn, river]) = sample_two_cards(&available, &mut rng) {
+            if let Some([turn, river]) = sample_two_cards(&available, rng) {
                 results.push(eval.equity_for_runout(hero_hand, vs_range, flop, turn, river));
             }
         }
     } else {
         for _ in 0..num_runouts {
-            if let Some([turn, river]) = sample_two_cards(&available, &mut rng) {
+            if let Some([turn, river]) = sample_two_cards(&available, rng) {
                 let full_board = [flop[0], flop[1], flop[2], turn, river];
                 results.push(calculate_omaha_leaf_equity(
                     hero_hand,
@@ -675,6 +733,25 @@ pub fn calculate_omaha_equity_monte_carlo_flop(
     }
 
     results
+}
+
+/// Monte Carlo simulation for Omaha equity on the flop
+/// Samples `num_runouts` random turn and river combinations
+/// Returns equity for each sampled runout
+pub fn calculate_omaha_equity_monte_carlo_flop(
+    hero_hand: &[u8],
+    vs_range: &OmahaRange,
+    flop: &[u8; 3],
+    num_runouts: usize,
+) -> Vec<RunoutEquities> {
+    let mut rng = rand::rng();
+    calculate_omaha_equity_monte_carlo_flop_with_rng(
+        hero_hand,
+        vs_range,
+        flop,
+        num_runouts,
+        &mut rng,
+    )
 }
 
 /// Equity of every hand in `hero_range` vs `vs_range`, aggregated over all board
@@ -1221,6 +1298,108 @@ mod tests {
                 assert_eq!(runout.equity, expected.equity, "board {:?}", runout.board);
             }
         }
+    }
+
+    #[test]
+    fn flop_precompute_ignores_impossible_villain_cards() {
+        let flop = [0, 6, 12];
+        let hero = [35, 34, 31, 30];
+        let mut range = OmahaRange::new(4);
+
+        // This hand is impossible on the flop but used to be evaluated during
+        // shared flop precompute, creating duplicate-card evaluator state.
+        range.add_hand(&[0, 1, 2, 3], 1.0);
+        range.add_hand(&[51, 50, 47, 46], 1.0);
+
+        let shared = calculate_omaha_equity_from_flop(&hero, &range, &flop);
+        assert!(!shared.is_empty());
+        for runout in &shared {
+            let expected = calculate_omaha_leaf_equity(&hero, &range, &runout.board);
+            assert_eq!(runout.equity, expected.equity, "board {:?}", runout.board);
+        }
+    }
+
+    #[test]
+    fn single_hero_paths_skip_board_conflicting_hero() {
+        let hero = [0, 34, 31, 30];
+        let mut range = OmahaRange::new(4);
+        range.add_hand(&[51, 50, 47, 46], 1.0);
+
+        let leaf = calculate_omaha_leaf_equity(&hero, &range, &[0, 6, 12, 19, 43]);
+        assert_eq!(leaf.equity, Equity::default());
+        assert!(
+            calculate_omaha_equity_vs_range(&hero, &range, &[0, 6, 12])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            calculate_omaha_equity_vs_range(&hero, &range, &[0, 6, 12, 19])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            calculate_omaha_equity_monte_carlo_flop(&hero, &range, &[0, 6, 12], 100).is_empty()
+        );
+    }
+
+    #[test]
+    fn runout_api_preserves_turn_cardinality_by_hand_size() {
+        let board = [0, 1, 2, 3];
+        for (hand_size, expected_len) in [(4, 44), (5, 43), (6, 42)] {
+            let hero: Vec<u8> = (4..4 + hand_size as u8).collect();
+            let villain: Vec<u8> = (20..20 + hand_size as u8).collect();
+            let mut range = OmahaRange::new(hand_size);
+            range.add_hand(&villain, 1.0);
+
+            let runouts =
+                calculate_omaha_runout_equity_vs_range(&hero, &range, &board, None, None).unwrap();
+            assert_eq!(runouts.len(), expected_len);
+            assert_eq!(runouts[0].board, [0, 1, 2, 3, 4 + hand_size as u8]);
+            assert_eq!(runouts.last().unwrap().board, [0, 1, 2, 3, 51]);
+        }
+    }
+
+    #[test]
+    fn runout_api_samples_seeded_flops_deterministically() {
+        let hero = [4, 5, 6, 7];
+        let mut range = OmahaRange::new(4);
+        range.add_hand(&[20, 21, 22, 23], 1.0);
+        range.add_hand(&[24, 25, 26, 27], 0.5);
+        let board = [0, 1, 2];
+
+        let first =
+            calculate_omaha_runout_equity_vs_range(&hero, &range, &board, Some(8), Some(1234))
+                .unwrap();
+        let second =
+            calculate_omaha_runout_equity_vs_range(&hero, &range, &board, Some(8), Some(1234))
+                .unwrap();
+
+        assert_eq!(first.len(), 8);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn single_hero_aggregate_matches_runout_sum() {
+        let hero = [4, 5, 6, 7];
+        let mut hero_range = OmahaRange::new(4);
+        hero_range.add_hand(&hero, 1.0);
+        let mut vs_range = OmahaRange::new(4);
+        vs_range.add_hand(&[20, 21, 22, 23], 1.0);
+        vs_range.add_hand(&[24, 25, 26, 27], 0.5);
+        let board = [0, 1, 2, 3];
+
+        let aggregate = calculate_omaha_range_equity(&hero_range, &vs_range, &board, None).unwrap();
+        let runouts =
+            calculate_omaha_runout_equity_vs_range(&hero, &vs_range, &board, None, None).unwrap();
+        let summed = runouts.iter().fold(Equity::default(), |mut acc, runout| {
+            acc.win += runout.equity.win;
+            acc.tie += runout.equity.tie;
+            acc.lose += runout.equity.lose;
+            acc
+        });
+
+        assert_eq!(aggregate.len(), 1);
+        assert_eq!(aggregate[0].equity, summed);
     }
 
     /// The range primitive must match single-hero leaf equity computed separately
