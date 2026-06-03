@@ -44,5 +44,10 @@ To publish an updated version:
 2. Rebuild and publish:
 
 ```bash
-wasm-pack build --target nodejs && cd pkg && npm publish
+node scripts/build-dual-package.mjs && cd pkg && npm publish
 ```
+
+The build script creates a dual package:
+
+- ESM consumers use `poker_wasm.js` with the bundler-target wasm.
+- CommonJS consumers use `poker_wasm.cjs` with the Node-target wasm.

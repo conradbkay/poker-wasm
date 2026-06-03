@@ -1,6 +1,6 @@
 [package]
 name = "poker-wasm"
-version = "2.0.0"
+version = "2.1.1"
 authors = ["Conrad Kay"]
 repository = "https://github.com/conradkay/power-range-rs"
 description = "WASM range vs range equity for NLHE"
