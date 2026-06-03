@@ -79,4 +79,17 @@ impl OmahaBoardState {
         }
         best
     }
+
+    /// Best rank when the legal 2-hole-card combinations have already been
+    /// materialized as `Hand` states. This avoids rebuilding the same hole pairs
+    /// for every 3-card board subset in Omaha.
+    #[inline]
+    pub fn best_over_hole_pair_states(&self, pairs: &[Hand]) -> i32 {
+        let mut best = i32::MIN;
+        for &pair in pairs {
+            let h = self.0 + pair;
+            best = best.max(h.evaluate() as i32);
+        }
+        best
+    }
 }

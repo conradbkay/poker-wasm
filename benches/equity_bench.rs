@@ -48,15 +48,18 @@ fn create_random_range(num_hands: usize, board: &[u8], seed: u64) -> HoldemRange
 
 // --- Omaha Helpers ---
 
-fn create_random_omaha_hand(used_cards: &HashSet<u8>, hand_size: usize) -> Option<Vec<u8>> {
-    let mut rng = rand::rng();
+fn create_random_omaha_hand(
+    used_cards: &HashSet<u8>,
+    hand_size: usize,
+    rng: &mut impl Rng,
+) -> Option<Vec<u8>> {
     let mut available: Vec<u8> = (0..52u8).filter(|c| !used_cards.contains(c)).collect();
 
     if available.len() < hand_size {
         return None;
     }
 
-    available.shuffle(&mut rng);
+    available.shuffle(rng);
     Some(available.into_iter().take(hand_size).collect())
 }
 
@@ -64,15 +67,21 @@ fn create_random_omaha_range(
     num_hands: usize,
     used_cards: &HashSet<u8>,
     hand_size: usize,
+    seed: u64,
 ) -> OmahaRange {
     let mut range = OmahaRange::new(hand_size);
-    let mut rng = rand::rng();
+    let mut rng = StdRng::seed_from_u64(seed);
     let mut added_hands = HashSet::new();
 
-    for _ in 0..num_hands {
-        if let Some(hand) = create_random_omaha_hand(used_cards, hand_size) {
+    let max_attempts = num_hands.saturating_mul(50).max(1);
+    for _ in 0..max_attempts {
+        if range.len() >= num_hands {
+            break;
+        }
+        if let Some(hand) = create_random_omaha_hand(used_cards, hand_size, &mut rng) {
             // Avoid duplicates
-            let hand_key = format!("{:?}", hand);
+            let mut hand_key = hand.clone();
+            hand_key.sort_unstable();
             if added_hands.insert(hand_key) {
                 let weight: f32 = rng.random_range(0.1..1.0);
                 range.add_hand(&hand, weight);
@@ -121,14 +130,16 @@ fn bench_omaha_leaf_equity(c: &mut Criterion) {
         let board = create_random_board(5, range_size as u64);
         let board5: [u8; 5] = [board[0], board[1], board[2], board[3], board[4]];
         let board_set: HashSet<u8> = board.iter().cloned().collect();
-        let hero_hand = create_random_omaha_hand(&board_set, 4).unwrap();
+        let mut rng = StdRng::seed_from_u64(0xA110 + range_size as u64);
+        let hero_hand = create_random_omaha_hand(&board_set, 4, &mut rng).unwrap();
 
         let mut hero_and_board = board_set.clone();
         for &c in &hero_hand {
             hero_and_board.insert(c);
         }
 
-        let range = create_random_omaha_range(range_size, &hero_and_board, 4);
+        let range =
+            create_random_omaha_range(range_size, &hero_and_board, 4, 0xBEEF + range_size as u64);
 
         group.bench_function(BenchmarkId::from_parameter(range_size), |b| {
             b.iter(|| calculate_omaha_leaf_equity(&hero_hand, &range, &board5))
@@ -137,7 +148,6 @@ fn bench_omaha_leaf_equity(c: &mut Criterion) {
 
     group.finish();
 }
-
 
 fn bench_omaha_flop_monte_carlo(c: &mut Criterion) {
     let configs = vec![(50, 100), (100, 100), (500, 100), (1000, 25), (1000, 100)];
@@ -148,14 +158,20 @@ fn bench_omaha_flop_monte_carlo(c: &mut Criterion) {
         let flop = create_random_board(3, range_size as u64);
         let flop3: [u8; 3] = [flop[0], flop[1], flop[2]];
         let flop_set: HashSet<u8> = flop.iter().cloned().collect();
-        let hero_hand = create_random_omaha_hand(&flop_set, 4).unwrap();
+        let mut rng = StdRng::seed_from_u64(0xF10F + range_size as u64 + num_runouts as u64);
+        let hero_hand = create_random_omaha_hand(&flop_set, 4, &mut rng).unwrap();
 
         let mut hero_and_flop = flop_set.clone();
         for &c in &hero_hand {
             hero_and_flop.insert(c);
         }
 
-        let range = create_random_omaha_range(range_size, &hero_and_flop, 4);
+        let range = create_random_omaha_range(
+            range_size,
+            &hero_and_flop,
+            4,
+            0xCAFE + range_size as u64 + num_runouts as u64,
+        );
 
         group.bench_function(
             BenchmarkId::new(
@@ -187,14 +203,16 @@ fn bench_omaha_flop_enumeration(c: &mut Criterion) {
     for &range_size in &range_sizes {
         let flop = create_random_board(3, range_size as u64);
         let flop_set: HashSet<u8> = flop.iter().cloned().collect();
-        let hero_hand = create_random_omaha_hand(&flop_set, 4).unwrap();
+        let mut rng = StdRng::seed_from_u64(0xF10E + range_size as u64);
+        let hero_hand = create_random_omaha_hand(&flop_set, 4, &mut rng).unwrap();
 
         let mut hero_and_flop = flop_set.clone();
         for &c in &hero_hand {
             hero_and_flop.insert(c);
         }
 
-        let range = create_random_omaha_range(range_size, &hero_and_flop, 4);
+        let range =
+            create_random_omaha_range(range_size, &hero_and_flop, 4, 0xFA11 + range_size as u64);
 
         group.bench_function(BenchmarkId::from_parameter(range_size), |b| {
             b.iter(|| calculate_omaha_equity_vs_range(&hero_hand, &range, &flop).unwrap())
@@ -207,7 +225,7 @@ fn bench_omaha_flop_enumeration(c: &mut Criterion) {
 /// Hero range vs villain range on a fixed board: the sorted + inclusion-exclusion
 /// primitive.
 fn bench_omaha_range_vs_range(c: &mut Criterion) {
-    let sizes = vec![50usize, 100, 250, 500, 1000];
+    let sizes = vec![50usize, 100, 250, 500, 1000, 2000];
     let mut group = c.benchmark_group("omaha_range_vs_range");
     group.sample_size(20);
 
@@ -215,8 +233,8 @@ fn bench_omaha_range_vs_range(c: &mut Criterion) {
         let board = create_random_board(5, size as u64);
         let board_arr: [u8; 5] = [board[0], board[1], board[2], board[3], board[4]];
         let board_set: HashSet<u8> = board.iter().cloned().collect();
-        let hero = create_random_omaha_range(size, &board_set, 4);
-        let vs = create_random_omaha_range(size, &board_set, 4);
+        let hero = create_random_omaha_range(size, &board_set, 4, 0x4845 + size as u64);
+        let vs = create_random_omaha_range(size, &board_set, 4, 0x5653 + size as u64);
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| calculate_omaha_leaf_equity_range(&hero, &vs, &board_arr))

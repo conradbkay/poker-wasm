@@ -6,6 +6,7 @@ use crate::evaluation::{
 };
 use crate::range::OmahaRange;
 use crate::types::Equity;
+use holdem_hand_evaluator::Hand;
 use rand::Rng;
 use wasm_bindgen::prelude::*;
 
@@ -67,10 +68,25 @@ fn compute_board_ps(board: &[u8; 5]) -> [OmahaBoardState; 10] {
 /// In Omaha, players MUST use exactly 2 hole cards + exactly 3 board cards.
 /// Supports PLO4 (60 combos), PLO5 (100 combos), and PLO6 (150 combos).
 fn eval_omaha_hand(hole_cards: &[u8], board_ps: &[OmahaBoardState; 10]) -> i32 {
+    let (pair_states, pair_count) = compute_hole_pair_states(hole_cards);
+    eval_omaha_pair_states(&pair_states[..pair_count], board_ps)
+}
+
+fn compute_hole_pair_states(hole_cards: &[u8]) -> ([Hand; 15], usize) {
     let combos = hole_combos(hole_cards.len());
+    let mut pair_states = [Hand::new(); 15];
+    for (i, &[a, b]) in combos.iter().enumerate() {
+        pair_states[i] = Hand::new()
+            .add_card(hole_cards[a] as usize)
+            .add_card(hole_cards[b] as usize);
+    }
+    (pair_states, combos.len())
+}
+
+fn eval_omaha_pair_states(pair_states: &[Hand], board_ps: &[OmahaBoardState; 10]) -> i32 {
     let mut best_rank = i32::MIN;
     for board_p in board_ps {
-        best_rank = best_rank.max(board_p.best_over_holes(hole_cards, combos));
+        best_rank = best_rank.max(board_p.best_over_hole_pair_states(pair_states));
     }
     best_rank
 }
@@ -99,9 +115,10 @@ fn hole_combos(hand_size: usize) -> &'static [[usize; 2]] {
 /// is recomputed per runout. The type-2 board states are board-only, so they're
 /// shared across the hero and the whole villain range.
 struct OmahaFlopEval {
-    combos: &'static [[usize; 2]],
     /// Board state after each single flop card (for the type-2 subsets).
     oneflop_p: [OmahaBoardState; 3],
+    hero_pair_states: [Hand; 15],
+    hero_pair_count: usize,
     hero_a: i32,
     hero_d: [i32; 52],
     /// Per-villain type-0 scalar and type-1 table (`m` rows of 52).
@@ -111,7 +128,8 @@ struct OmahaFlopEval {
 
 impl OmahaFlopEval {
     fn build(hero_hand: &[u8], vs_range: &OmahaRange, flop: &[u8; 3]) -> Self {
-        let combos = hole_combos(hero_hand.len());
+        let (hero_pair_states, hero_pair_count) = compute_hole_pair_states(hero_hand);
+        let hero_pairs = &hero_pair_states[..hero_pair_count];
 
         // Board-only partial states (shared by hero and every villain).
         let flop_p = OmahaBoardState::from_cards(flop); // type-0: all three flop cards
@@ -140,15 +158,15 @@ impl OmahaFlopEval {
         // for both the bitmask skip and the `d`/`bs1` indexing, so a range loop is
         // the natural form here.
         #[allow(clippy::needless_range_loop)]
-        let fill = |hole: &[u8], a: &mut i32, d: &mut [i32]| {
-            *a = flop_p.best_over_holes(hole, combos);
+        let fill = |pairs: &[Hand], a: &mut i32, d: &mut [i32]| {
+            *a = flop_p.best_over_hole_pair_states(pairs);
             for x in 0..52usize {
                 if flop_mask & (1u64 << x) != 0 {
                     continue;
                 }
                 let mut best = i32::MIN;
                 for p in 0..3 {
-                    best = best.max(bs1[p][x].best_over_holes(hole, combos));
+                    best = best.max(bs1[p][x].best_over_hole_pair_states(pairs));
                 }
                 d[x] = best;
             }
@@ -156,20 +174,21 @@ impl OmahaFlopEval {
 
         let mut hero_a = i32::MIN;
         let mut hero_d = [i32::MIN; 52];
-        fill(hero_hand, &mut hero_a, &mut hero_d);
+        fill(hero_pairs, &mut hero_a, &mut hero_d);
 
         let m = vs_range.len();
         let mut villain_a = vec![i32::MIN; m];
         let mut villain_d = vec![i32::MIN; m * 52];
-        for (v, (hole, _w)) in vs_range.iter().enumerate() {
+        for (v, (_hole, _w, _mask, pairs)) in vs_range.iter_eval_ready().enumerate() {
             let mut a = i32::MIN;
-            fill(hole, &mut a, &mut villain_d[v * 52..v * 52 + 52]);
+            fill(pairs, &mut a, &mut villain_d[v * 52..v * 52 + 52]);
             villain_a[v] = a;
         }
 
         OmahaFlopEval {
-            combos,
             oneflop_p,
+            hero_pair_states,
+            hero_pair_count,
             hero_a,
             hero_d,
             villain_a,
@@ -181,10 +200,10 @@ impl OmahaFlopEval {
     /// turn+river (the only part not precomputed). Combined with the cached
     /// `a`/`d[t]`/`d[r]` by the caller.
     #[inline]
-    fn type2_best(&self, hole: &[u8], board3: &[OmahaBoardState; 3]) -> i32 {
+    fn type2_best(&self, pairs: &[Hand], board3: &[OmahaBoardState; 3]) -> i32 {
         let mut e = i32::MIN;
         for bp in board3 {
-            e = e.max(bp.best_over_holes(hole, self.combos));
+            e = e.max(bp.best_over_hole_pair_states(pairs));
         }
         e
     }
@@ -205,7 +224,8 @@ impl OmahaFlopEval {
         let board3: [OmahaBoardState; 3] =
             std::array::from_fn(|i| self.oneflop_p[i].add_card(turn).add_card(river));
 
-        let hero_e = self.type2_best(hero_hand, &board3);
+        let hero_pairs = &self.hero_pair_states[..self.hero_pair_count];
+        let hero_e = self.type2_best(hero_pairs, &board3);
         let hero_rank = self
             .hero_a
             .max(self.hero_d[t])
@@ -215,12 +235,12 @@ impl OmahaFlopEval {
         let dead_mask = cards_to_mask(hero_hand) | cards_to_mask(flop) | (1u64 << t) | (1u64 << r);
 
         let (mut win, mut tie, mut lose) = (0.0f32, 0.0f32, 0.0f32);
-        for (v, (hole, weight, mask)) in vs_range.iter_masked().enumerate() {
+        for (v, (_hole, weight, mask, pairs)) in vs_range.iter_eval_ready().enumerate() {
             if mask & dead_mask != 0 {
                 continue;
             }
             let d = &self.villain_d[v * 52..v * 52 + 52];
-            let e = self.type2_best(hole, &board3);
+            let e = self.type2_best(pairs, &board3);
             let villain_rank = self.villain_a[v].max(d[t]).max(d[r]).max(e);
 
             if hero_rank > villain_rank {
@@ -277,13 +297,13 @@ pub fn calculate_omaha_leaf_equity(
     let mut tie_weight = 0.0;
     let mut lose_weight = 0.0;
 
-    for (villain_hand, weight, villain_mask) in vs_range.iter_masked() {
+    for (_villain_hand, weight, villain_mask, pair_states) in vs_range.iter_eval_ready() {
         // Card removal/blocking: a single AND against the dead cards.
         if villain_mask & dead_mask != 0 {
             continue; // This villain combo is impossible
         }
 
-        let villain_rank = eval_omaha_hand(villain_hand, &board_ps);
+        let villain_rank = eval_omaha_pair_states(pair_states, &board_ps);
 
         if hero_rank > villain_rank {
             win_weight += weight;
@@ -301,97 +321,6 @@ pub fn calculate_omaha_leaf_equity(
             tie: tie_weight,
             lose: lose_weight,
         },
-    }
-}
-
-/// Open-addressing `u64 -> dense-slot` map for the blocker inclusion-exclusion.
-/// Subset bitmasks are always non-zero, so `0` doubles as the empty marker, and a
-/// multiplicative (Fibonacci) hash keeps a lookup to a couple of loads — the std
-/// `HashMap`'s SipHash dominated this hot path otherwise.
-struct SubsetSlots {
-    keys: Vec<u64>,
-    slots: Vec<u32>,
-    mask: usize,
-    shift: u32,
-    len: usize,
-}
-
-impl SubsetSlots {
-    fn with_capacity(n: usize) -> Self {
-        let cap = (n.max(8) * 2).next_power_of_two();
-        Self {
-            keys: vec![0u64; cap],
-            slots: vec![0u32; cap],
-            mask: cap - 1,
-            shift: 64 - cap.trailing_zeros(),
-            len: 0,
-        }
-    }
-
-    #[inline]
-    fn index(&self, key: u64) -> usize {
-        (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> self.shift) as usize
-    }
-
-    #[inline]
-    fn get(&self, key: u64) -> Option<u32> {
-        let mut i = self.index(key);
-        loop {
-            let k = self.keys[i];
-            if k == 0 {
-                return None;
-            }
-            if k == key {
-                return Some(self.slots[i]);
-            }
-            i = (i + 1) & self.mask;
-        }
-    }
-
-    /// Slot for `key`, inserting a fresh dense id (`*next`, then bumped) if absent.
-    #[inline]
-    fn get_or_insert(&mut self, key: u64, next: &mut u32) -> u32 {
-        if (self.len + 1) * 2 > self.keys.len() {
-            self.grow();
-        }
-        let mut i = self.index(key);
-        loop {
-            let k = self.keys[i];
-            if k == 0 {
-                self.keys[i] = key;
-                let s = *next;
-                self.slots[i] = s;
-                *next += 1;
-                self.len += 1;
-                return s;
-            }
-            if k == key {
-                return self.slots[i];
-            }
-            i = (i + 1) & self.mask;
-        }
-    }
-
-    fn grow(&mut self) {
-        let new_cap = self.keys.len() * 2;
-        let mut new = SubsetSlots {
-            keys: vec![0u64; new_cap],
-            slots: vec![0u32; new_cap],
-            mask: new_cap - 1,
-            shift: 64 - new_cap.trailing_zeros(),
-            len: self.len,
-        };
-        for (i, &k) in self.keys.iter().enumerate() {
-            if k != 0 {
-                let mut j = new.index(k);
-                while new.keys[j] != 0 {
-                    j = (j + 1) & new.mask;
-                }
-                new.keys[j] = k;
-                new.slots[j] = self.slots[i];
-            }
-        }
-        *self = new;
     }
 }
 
@@ -433,8 +362,6 @@ pub fn calculate_omaha_leaf_equity_range(
 
     // --- Villains: evaluate once; give every distinct subset a dense slot. ---
     let m = vs_range.len();
-    let mut map = SubsetSlots::with_capacity(m * stride);
-    let mut next_slot: u32 = 0;
 
     struct Villain {
         rank: i32,
@@ -445,53 +372,51 @@ pub fn calculate_omaha_leaf_equity_range(
     let mut villain_slots: Vec<u32> = Vec::with_capacity(m * stride);
     let mut total_all = 0.0f32;
 
-    for (hand, weight, mask) in vs_range.iter_masked() {
+    for (_hand, weight, mask, pair_states, _subset_masks, subset_slots) in
+        vs_range.iter_eval_and_subsets()
+    {
         if mask & board_mask != 0 {
             continue; // villain shares a board card -> impossible on this board
         }
-        let rank = eval_omaha_hand(hand, &board_ps);
+        let rank = eval_omaha_pair_states(pair_states, &board_ps);
         let off = villain_slots.len() as u32;
-        let mut s = mask;
-        while s != 0 {
-            villain_slots.push(map.get_or_insert(s, &mut next_slot));
-            s = (s - 1) & mask;
-        }
+        villain_slots.extend_from_slice(subset_slots);
         total_all += weight;
         villains.push(Villain { rank, weight, off });
     }
 
-    let n_slots = next_slot as usize;
-    let sentinel = n_slots as u32; // trailing always-zero slot for hero-only subsets
-    let arr_len = n_slots + 1;
+    let n_slots = vs_range.subset_slot_count();
+    let arr_len = n_slots + 1; // index 0 is the always-zero hero-only subset sentinel
 
-    // A_all[slot] = total villain weight whose cards ⊇ subset(slot).
+    // A_all[slot + 1] = total villain weight whose cards ⊇ subset(slot).
     let mut a_all = vec![0.0f32; arr_len];
     for v in &villains {
         for &sl in &villain_slots[v.off as usize..v.off as usize + stride] {
-            a_all[sl as usize] += v.weight;
+            a_all[sl as usize + 1] += v.weight;
         }
     }
 
-    // Per-hero rank and the signed subset terms for the IE sum, stored flat at the
-    // same `stride`. A hero hand sharing a board card is impossible on this board
-    // and stays at zero equity (matching the board-blocked handling for villains).
+    // Per-hero rank and compact subset slots for the IE sum, stored flat at the
+    // same `stride`. Odd-card subsets are stored first and added; even-card
+    // subsets follow and are subtracted. Slot 0 is an always-zero sentinel for
+    // hero-only subsets no villain contains.
     let hero_count = hero_range.len();
     let mut hero_rank = vec![0i32; hero_count];
     let mut hero_blocked = vec![false; hero_count];
-    let mut hero_terms: Vec<(u32, f32)> = Vec::with_capacity(hero_count * stride);
-    for (hi, (hand, _w, mask)) in hero_range.iter_masked().enumerate() {
+    let odd_terms = 1usize << (k - 1);
+    let mut hero_slots: Vec<u32> = Vec::with_capacity(hero_count * stride);
+    for (hi, (_hand, _w, mask, pair_states, subset_masks, _own_subset_slots)) in
+        hero_range.iter_eval_and_subsets().enumerate()
+    {
+        let base = hero_slots.len();
+        hero_slots.resize(base + stride, 0);
         if mask & board_mask != 0 {
             hero_blocked[hi] = true;
-            hero_terms.resize(hero_terms.len() + stride, (sentinel, 0.0));
             continue;
         }
-        hero_rank[hi] = eval_omaha_hand(hand, &board_ps);
-        let mut s = mask;
-        while s != 0 {
-            let slot = map.get(s).unwrap_or(sentinel);
-            let sign = if s.count_ones() & 1 == 1 { 1.0 } else { -1.0 };
-            hero_terms.push((slot, sign));
-            s = (s - 1) & mask;
+        hero_rank[hi] = eval_omaha_pair_states(pair_states, &board_ps);
+        for (i, &subset) in subset_masks.iter().enumerate() {
+            hero_slots[base + i] = vs_range.subset_slot(subset).map(|sl| sl + 1).unwrap_or(0);
         }
     }
 
@@ -516,7 +441,7 @@ pub fn calculate_omaha_leaf_equity_range(
         while vi < m && villains[vi].rank < r {
             let v = &villains[vi];
             for &sl in &villain_slots[v.off as usize..v.off as usize + stride] {
-                w_run[sl as usize] += v.weight;
+                w_run[sl as usize + 1] += v.weight;
             }
             weaker_total += v.weight;
             vi += 1;
@@ -529,10 +454,11 @@ pub fn calculate_omaha_leaf_equity_range(
         while gj < m && villains[gj].rank == r {
             let v = &villains[gj];
             for &sl in &villain_slots[v.off as usize..v.off as usize + stride] {
-                if w_group[sl as usize] == 0.0 {
-                    group_touched.push(sl);
+                let idx = sl + 1;
+                if w_group[idx as usize] == 0.0 {
+                    group_touched.push(idx);
                 }
-                w_group[sl as usize] += v.weight;
+                w_group[idx as usize] += v.weight;
             }
             group_total += v.weight;
             gj += 1;
@@ -546,11 +472,18 @@ pub fn calculate_omaha_leaf_equity_range(
                 continue; // impossible on this board; leaves zero equity
             }
             let (mut blk_lt, mut blk_eq, mut blk_all) = (0.0f32, 0.0f32, 0.0f32);
-            for &(sl, sign) in &hero_terms[hi * stride..hi * stride + stride] {
+            let terms = &hero_slots[hi * stride..hi * stride + stride];
+            for &sl in &terms[..odd_terms] {
                 let s = sl as usize;
-                blk_lt += sign * w_run[s];
-                blk_eq += sign * w_group[s];
-                blk_all += sign * a_all[s];
+                blk_lt += w_run[s];
+                blk_eq += w_group[s];
+                blk_all += a_all[s];
+            }
+            for &sl in &terms[odd_terms..] {
+                let s = sl as usize;
+                blk_lt -= w_run[s];
+                blk_eq -= w_group[s];
+                blk_all -= a_all[s];
             }
             let win = weaker_total - blk_lt;
             let tie = group_total - blk_eq;
@@ -851,7 +784,11 @@ pub fn calculate_omaha_range_equity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::Rng;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use std::collections::HashSet;
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
 
     /// Independent, minimal reimplementation of leaf equity: a plain per-villain
     /// loop with a straightforward bit-by-bit card overlap check, deliberately not
@@ -901,6 +838,302 @@ mod tests {
             }
         }
         (hand, mask & !used)
+    }
+
+    fn deterministic_range(size: usize, board_mask: u64, seed: u64) -> OmahaRange {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut range = OmahaRange::new(4);
+        let mut seen = HashSet::new();
+        let max_attempts = size.saturating_mul(50).max(1);
+        for _ in 0..max_attempts {
+            if range.len() >= size {
+                break;
+            }
+            let (hand, _) = random_plo4(board_mask, &mut rng);
+            let mut key = hand;
+            key.sort_unstable();
+            if seen.insert(key) {
+                range.add_hand(&hand, rng.random_range(0.1..1.0));
+            }
+        }
+        assert_eq!(range.len(), size);
+        range
+    }
+
+    #[derive(Default)]
+    struct StageTimes {
+        board: Duration,
+        villain_build: Duration,
+        all_weights: Duration,
+        hero_build: Duration,
+        sort: Duration,
+        sweep: Duration,
+    }
+
+    fn timed_range_equity_plo4(
+        hero_range: &OmahaRange,
+        vs_range: &OmahaRange,
+        board: &[u8; 5],
+    ) -> (Vec<Equity>, StageTimes) {
+        let mut times = StageTimes::default();
+
+        let t = Instant::now();
+        let board_mask = cards_to_mask(board);
+        let board_ps = compute_board_ps(board);
+        times.board += t.elapsed();
+
+        let k = vs_range.hand_size();
+        let stride = (1usize << k) - 1;
+        let m = vs_range.len();
+
+        struct ProfileVillain {
+            rank: i32,
+            weight: f32,
+            off: u32,
+        }
+        let mut villains: Vec<ProfileVillain> = Vec::with_capacity(m);
+        let mut villain_slots: Vec<u32> = Vec::with_capacity(m * stride);
+        let mut total_all = 0.0f32;
+
+        let t = Instant::now();
+        for (_hand, weight, mask, pair_states, _subset_masks, subset_slots) in
+            vs_range.iter_eval_and_subsets()
+        {
+            if mask & board_mask != 0 {
+                continue;
+            }
+            let rank = eval_omaha_pair_states(pair_states, &board_ps);
+            let off = villain_slots.len() as u32;
+            villain_slots.extend_from_slice(subset_slots);
+            total_all += weight;
+            villains.push(ProfileVillain { rank, weight, off });
+        }
+        times.villain_build += t.elapsed();
+
+        let n_slots = vs_range.subset_slot_count();
+        let arr_len = n_slots + 1;
+
+        let t = Instant::now();
+        let mut a_all = vec![0.0f32; arr_len];
+        for v in &villains {
+            for &sl in &villain_slots[v.off as usize..v.off as usize + stride] {
+                a_all[sl as usize + 1] += v.weight;
+            }
+        }
+        times.all_weights += t.elapsed();
+
+        let hero_count = hero_range.len();
+        let mut hero_rank = vec![0i32; hero_count];
+        let mut hero_blocked = vec![false; hero_count];
+        let odd_terms = 1usize << (k - 1);
+        let mut hero_slots: Vec<u32> = Vec::with_capacity(hero_count * stride);
+
+        let t = Instant::now();
+        for (hi, (_hand, _w, mask, pair_states, subset_masks, _own_subset_slots)) in
+            hero_range.iter_eval_and_subsets().enumerate()
+        {
+            let base = hero_slots.len();
+            hero_slots.resize(base + stride, 0);
+            if mask & board_mask != 0 {
+                hero_blocked[hi] = true;
+                continue;
+            }
+            hero_rank[hi] = eval_omaha_pair_states(pair_states, &board_ps);
+            for (i, &subset) in subset_masks.iter().enumerate() {
+                hero_slots[base + i] = vs_range.subset_slot(subset).map(|sl| sl + 1).unwrap_or(0);
+            }
+        }
+        times.hero_build += t.elapsed();
+
+        let t = Instant::now();
+        villains.sort_unstable_by_key(|v| v.rank);
+        let mut hero_order: Vec<usize> = (0..hero_count).collect();
+        hero_order.sort_unstable_by_key(|&i| hero_rank[i]);
+        times.sort += t.elapsed();
+
+        let t = Instant::now();
+        let mut equities = vec![Equity::default(); hero_count];
+        let mut w_run = vec![0.0f32; arr_len];
+        let mut weaker_total = 0.0f32;
+        let mut w_group = vec![0.0f32; arr_len];
+        let mut group_touched: Vec<u32> = Vec::new();
+
+        let m = villains.len();
+        let mut vi = 0usize;
+        let mut hoi = 0usize;
+        while hoi < hero_count {
+            let r = hero_rank[hero_order[hoi]];
+
+            while vi < m && villains[vi].rank < r {
+                let v = &villains[vi];
+                for &sl in &villain_slots[v.off as usize..v.off as usize + stride] {
+                    w_run[sl as usize + 1] += v.weight;
+                }
+                weaker_total += v.weight;
+                vi += 1;
+            }
+
+            group_touched.clear();
+            let mut group_total = 0.0f32;
+            let mut gj = vi;
+            while gj < m && villains[gj].rank == r {
+                let v = &villains[gj];
+                for &sl in &villain_slots[v.off as usize..v.off as usize + stride] {
+                    let idx = sl + 1;
+                    if w_group[idx as usize] == 0.0 {
+                        group_touched.push(idx);
+                    }
+                    w_group[idx as usize] += v.weight;
+                }
+                group_total += v.weight;
+                gj += 1;
+            }
+
+            while hoi < hero_count && hero_rank[hero_order[hoi]] == r {
+                let hi = hero_order[hoi];
+                if hero_blocked[hi] {
+                    hoi += 1;
+                    continue;
+                }
+                let (mut blk_lt, mut blk_eq, mut blk_all) = (0.0f32, 0.0f32, 0.0f32);
+                let terms = &hero_slots[hi * stride..hi * stride + stride];
+                for &sl in &terms[..odd_terms] {
+                    let s = sl as usize;
+                    blk_lt += w_run[s];
+                    blk_eq += w_group[s];
+                    blk_all += a_all[s];
+                }
+                for &sl in &terms[odd_terms..] {
+                    let s = sl as usize;
+                    blk_lt -= w_run[s];
+                    blk_eq -= w_group[s];
+                    blk_all -= a_all[s];
+                }
+                let win = weaker_total - blk_lt;
+                let tie = group_total - blk_eq;
+                let lose = (total_all - blk_all) - win - tie;
+                equities[hi] = Equity { win, tie, lose };
+                hoi += 1;
+            }
+
+            for &sl in &group_touched {
+                w_group[sl as usize] = 0.0;
+            }
+        }
+        times.sweep += t.elapsed();
+
+        (equities, times)
+    }
+
+    #[test]
+    #[ignore = "stage-level profiler; run manually with --ignored --nocapture"]
+    fn profile_range_equity_2000_stages() {
+        let board = [34, 21, 46, 8, 17];
+        let board_mask = cards_to_mask(&board);
+        let hero = deterministic_range(2000, board_mask, 0x4845 + 2000);
+        let vs = deterministic_range(2000, board_mask, 0x5653 + 2000);
+
+        let got = calculate_omaha_leaf_equity_range(&hero, &vs, &board);
+        let (profiled, _) = timed_range_equity_plo4(&hero, &vs, &board);
+        assert_eq!(got.len(), profiled.len());
+        for (a, b) in got.iter().zip(&profiled) {
+            assert!((a.win - b.win).abs() <= 0.001);
+            assert!((a.tie - b.tie).abs() <= 0.001);
+            assert!((a.lose - b.lose).abs() <= 0.001);
+        }
+
+        let mut total = StageTimes::default();
+        let iters = 200;
+        for _ in 0..iters {
+            let (_equities, t) =
+                timed_range_equity_plo4(black_box(&hero), black_box(&vs), black_box(&board));
+            total.board += t.board;
+            total.villain_build += t.villain_build;
+            total.all_weights += t.all_weights;
+            total.hero_build += t.hero_build;
+            total.sort += t.sort;
+            total.sweep += t.sweep;
+        }
+
+        let total_ns = total.board.as_nanos()
+            + total.villain_build.as_nanos()
+            + total.all_weights.as_nanos()
+            + total.hero_build.as_nanos()
+            + total.sort.as_nanos()
+            + total.sweep.as_nanos();
+        let print = |label: &str, d: Duration| {
+            let ns = d.as_nanos();
+            eprintln!(
+                "{label:>14}: {:>8.2} us/iter ({:>5.1}%)",
+                ns as f64 / iters as f64 / 1000.0,
+                ns as f64 * 100.0 / total_ns as f64
+            );
+        };
+        eprintln!("profile_range_equity_2000_stages ({iters} iterations)");
+        print("board", total.board);
+        print("villain_build", total.villain_build);
+        print("all_weights", total.all_weights);
+        print("hero_build", total.hero_build);
+        print("sort", total.sort);
+        print("sweep", total.sweep);
+
+        let board_ps = compute_board_ps(&board);
+
+        let t = Instant::now();
+        let mut rank_acc = 0i32;
+        for _ in 0..iters {
+            for (_hand, _w, _mask, pairs) in hero.iter_eval_ready() {
+                rank_acc ^= eval_omaha_pair_states(black_box(pairs), black_box(&board_ps));
+            }
+            for (_hand, _w, _mask, pairs) in vs.iter_eval_ready() {
+                rank_acc ^= eval_omaha_pair_states(black_box(pairs), black_box(&board_ps));
+            }
+        }
+        let rank_eval = t.elapsed();
+
+        let t = Instant::now();
+        let mut copied_slots = 0usize;
+        for _ in 0..iters {
+            for (_hand, _w, _mask, _pairs, _subset_masks, subset_slots) in
+                vs.iter_eval_and_subsets()
+            {
+                for &slot in subset_slots {
+                    copied_slots += slot as usize;
+                }
+            }
+        }
+        let cached_slot_copy = t.elapsed();
+
+        let t = Instant::now();
+        let mut lookup_slots = 0usize;
+        for _ in 0..iters {
+            for (_hand, _w, _mask, _pairs, subset_masks, _subset_slots) in
+                hero.iter_eval_and_subsets()
+            {
+                for &subset in subset_masks {
+                    lookup_slots += vs.subset_slot(subset).unwrap_or(0) as usize;
+                }
+            }
+        }
+        let subset_lookup = t.elapsed();
+
+        eprintln!("micro chunks ({iters} iterations)");
+        eprintln!(
+            "{:>14}: {:>8.2} us/iter",
+            "rank_eval_4k",
+            rank_eval.as_nanos() as f64 / iters as f64 / 1000.0
+        );
+        eprintln!(
+            "{:>14}: {:>8.2} us/iter",
+            "slot_copy",
+            cached_slot_copy.as_nanos() as f64 / iters as f64 / 1000.0
+        );
+        eprintln!(
+            "{:>14}: {:>8.2} us/iter",
+            "subset_lookup",
+            subset_lookup.as_nanos() as f64 / iters as f64 / 1000.0
+        );
+        black_box((rank_acc, copied_slots, lookup_slots));
     }
 
     /// Full leaf-equity pipeline must match the brute-force reference exactly,
