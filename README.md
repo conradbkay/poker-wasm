@@ -2,6 +2,8 @@
 
 Hold'em range vs range equity calculation in 11 µs or less
 
+^Omaha in ~390 µs for 2000 vs 2000 random hands. Supports PLO5 (~2x runtime) and PLO6 (~4x)
+
 ## Usage
 
 ```bash

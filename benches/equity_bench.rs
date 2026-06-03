@@ -225,7 +225,7 @@ fn bench_omaha_flop_enumeration(c: &mut Criterion) {
 /// Hero range vs villain range on a fixed board: the sorted + inclusion-exclusion
 /// primitive.
 fn bench_omaha_range_vs_range(c: &mut Criterion) {
-    let sizes = vec![50usize, 100, 250, 500, 1000, 2000];
+    let sizes = vec![50usize, 100, 250, 500, 1000, 2000, 20000];
     let mut group = c.benchmark_group("omaha_range_vs_range");
     group.sample_size(20);
 
@@ -244,12 +244,34 @@ fn bench_omaha_range_vs_range(c: &mut Criterion) {
     group.finish();
 }
 
+/// Fixed-board range vs range at the user's target 2000-combo size for PLO5/PLO6.
+fn bench_omaha_range_vs_range_2000_variants(c: &mut Criterion) {
+    let mut group = c.benchmark_group("omaha_range_vs_range_2000_variants");
+    group.sample_size(20);
+
+    for &hand_size in &[5usize, 6] {
+        let board = create_random_board(5, 0x2000 + hand_size as u64);
+        let board_arr: [u8; 5] = [board[0], board[1], board[2], board[3], board[4]];
+        let board_set: HashSet<u8> = board.iter().cloned().collect();
+        let hero =
+            create_random_omaha_range(2000, &board_set, hand_size, 0x4845 + hand_size as u64);
+        let vs = create_random_omaha_range(2000, &board_set, hand_size, 0x5653 + hand_size as u64);
+
+        group.bench_function(format!("PLO{hand_size}"), |b| {
+            b.iter(|| calculate_omaha_leaf_equity_range(&hero, &vs, &board_arr))
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_holdem_leaf_equity,
     bench_omaha_leaf_equity,
     bench_omaha_flop_monte_carlo,
     bench_omaha_flop_enumeration,
-    bench_omaha_range_vs_range
+    bench_omaha_range_vs_range,
+    bench_omaha_range_vs_range_2000_variants
 );
 criterion_main!(benches);
