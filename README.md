@@ -83,11 +83,6 @@ const results = calculator.omahaEquityVsRange(flop, 1000)
 
 ### Omaha (PLO) Per-Runout Equity
 
-For reports and equity-distribution features, use the per-runout API instead of
-the aggregate range API. It returns one result for each complete future board:
-all legal rivers on a turn board, all legal turn/river pairs on a flop board, or
-`maxRunouts` sampled turn/river pairs when requested.
-
 ```ts
 const heroHand = new Uint8Array([35, 34, 31, 30])
 const turn = new Uint8Array([0, 1, 2, 10])
