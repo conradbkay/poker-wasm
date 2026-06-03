@@ -14,9 +14,9 @@ pub fn final_p(ranks_data: &[i32], p: usize) -> u32 {
     ranks_data.get(p).copied().unwrap_or(0) as u32
 }
 
-/**
- * doesn't return the correct final values for 5/6 cards, use fast_eval_partial for that
- */
+/// Walks `cards` from table position `p`, returning the intermediate position.
+/// This is *not* a final hand rank for 5/6-card hands — call [`final_p`] on the
+/// result to resolve those (as `gen_board_eval` and the Omaha evaluator do).
 #[inline]
 pub fn fast_eval(ranks_data: &[i32], cards: &[u8], mut p: usize) -> u32 {
     for &card in cards {

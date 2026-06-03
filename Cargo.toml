@@ -1,6 +1,6 @@
 [package]
 name = "poker-wasm"
-version = "1.3.0"
+version = "2.0.0"
 authors = ["Conrad Kay"]
 repository = "https://github.com/conradkay/power-range-rs"
 description = "WASM range vs range equity for NLHE"
@@ -8,6 +8,11 @@ edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+# Let wasm-opt keep optimizing while allowing the features rustc emits (+simd128,
+# +bulk-memory, saturating float->int); otherwise it fails validation.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O', '--enable-simd', '--enable-bulk-memory', '--enable-nontrapping-float-to-int']
 
 [dependencies]
 lazy_static = "1.5.0"

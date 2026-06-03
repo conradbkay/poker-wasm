@@ -20,7 +20,8 @@ pub struct EquityCalculator {
     hand_ranks_data: Vec<i32>,
     cached_hero_range: Option<HoldemRange>,
     cached_vs_range: Option<HoldemRange>,
-    cached_omaha_range: Option<OmahaRange>,
+    cached_omaha_hero_range: Option<OmahaRange>,
+    cached_omaha_vs_range: Option<OmahaRange>,
 }
 
 #[wasm_bindgen]
@@ -37,7 +38,8 @@ impl EquityCalculator {
             hand_ranks_data,
             cached_hero_range: None,
             cached_vs_range: None,
-            cached_omaha_range: None,
+            cached_omaha_hero_range: None,
+            cached_omaha_vs_range: None,
         }
     }
 
@@ -55,11 +57,18 @@ impl EquityCalculator {
         self.cached_vs_range = Some(range);
     }
 
-    /// Set the cached Omaha range for Omaha calculations
-    /// Call this once before using cached methods to avoid repeated memory transfers
-    #[wasm_bindgen(js_name = setOmahaRange)]
-    pub fn set_omaha_range(&mut self, range: OmahaRange) {
-        self.cached_omaha_range = Some(range);
+    /// Set the cached Omaha hero range (the hands whose equity is computed).
+    /// Call this once before `omahaEquityVsRange` to avoid repeated memory transfers.
+    #[wasm_bindgen(js_name = setOmahaHeroRange)]
+    pub fn set_omaha_hero_range(&mut self, range: OmahaRange) {
+        self.cached_omaha_hero_range = Some(range);
+    }
+
+    /// Set the cached Omaha villain range (the opposing hands).
+    /// Call this once before `omahaEquityVsRange` to avoid repeated memory transfers.
+    #[wasm_bindgen(js_name = setOmahaVsRange)]
+    pub fn set_omaha_vs_range(&mut self, range: OmahaRange) {
+        self.cached_omaha_vs_range = Some(range);
     }
 
     /// Calculate equity for each hand in hero_range vs vs_range
@@ -83,121 +92,29 @@ impl EquityCalculator {
         )
     }
 
-    /// Calculate leaf equity (5-card board only, no enumeration)
-    /// IMPORTANT: Call setHeroRange and setVsRange before using this method
-    #[wasm_bindgen]
-    pub fn leaf_equity_vs_range(
+    /// Equity of every hand in the hero range vs the villain range, aggregated
+    /// over all runouts of a 3-, 4-, or 5-card board. A single hero hand is just a
+    /// one-hand range. `maxRunouts`, when given on a 3-card board, samples that
+    /// many turn/river runouts (Monte Carlo) instead of enumerating all of them.
+    /// IMPORTANT: Call setOmahaHeroRange and setOmahaVsRange before using this.
+    #[wasm_bindgen(js_name = omahaEquityVsRange)]
+    pub fn omaha_equity_vs_range(
         &self,
         board: &[u8],
-    ) -> Result<Vec<EquityResult>, String> {
-        let hero_range = self.cached_hero_range.as_ref()
-            .ok_or("No hero range set. Call setHeroRange first.")?;
-        let vs_range = self.cached_vs_range.as_ref()
-            .ok_or("No villain range set. Call setVsRange first.")?;
+        max_runouts: Option<usize>,
+    ) -> Result<Vec<OmahaEquityResult>, String> {
+        let hero_range = self.cached_omaha_hero_range.as_ref()
+            .ok_or("No Omaha hero range set. Call setOmahaHeroRange first.")?;
+        let vs_range = self.cached_omaha_vs_range.as_ref()
+            .ok_or("No Omaha villain range set. Call setOmahaVsRange first.")?;
 
-        Ok(equity::holdem::calculate_leaf_equity(
+        equity::omaha::calculate_omaha_range_equity(
             &self.hand_ranks_data,
             hero_range,
             vs_range,
             board,
-        ))
-    }
-
-    /// Calculate Omaha equity for a single hand vs a range
-    /// Returns equity for each possible runout
-    /// IMPORTANT: Call setOmahaRange before using this method
-    #[wasm_bindgen(js_name = omahaEquityVsRange)]
-    pub fn omaha_equity_vs_range(
-        &self,
-        hero_hand: &[u8],
-        board: &[u8],
-    ) -> Result<Vec<RunoutEquities>, String> {
-        let vs_range = self.cached_omaha_range.as_ref()
-            .ok_or("No Omaha range set. Call setOmahaRange first.")?;
-
-        equity::omaha::calculate_omaha_equity_vs_range(
-            &self.hand_ranks_data,
-            hero_hand,
-            vs_range,
-            board
+            max_runouts,
         )
-    }
-
-    /// Calculate Omaha leaf equity (5-card board only, no enumeration)
-    /// hero_hand must be 4, 5, or 6 cards (matching the range)
-    /// board must be exactly 5 cards
-    /// IMPORTANT: Call setOmahaRange before using this method
-    #[wasm_bindgen(js_name = omahaLeafEquityVsRange)]
-    pub fn omaha_leaf_equity_vs_range(
-        &self,
-        hero_hand: &[u8],
-        board: &[u8],
-    ) -> Result<RunoutEquities, String> {
-        let vs_range = self.cached_omaha_range.as_ref()
-            .ok_or("No Omaha range set. Call setOmahaRange first.")?;
-
-        if ![4, 5, 6].contains(&hero_hand.len()) {
-            return Err(format!("Hero hand must be 4, 5, or 6 cards, got {}", hero_hand.len()));
-        }
-        if hero_hand.len() != vs_range.hand_size() {
-            return Err(format!(
-                "Hero hand size ({}) must match range hand size ({})",
-                hero_hand.len(),
-                vs_range.hand_size()
-            ));
-        }
-        if board.len() != 5 {
-            return Err("Board must be exactly 5 cards".to_string());
-        }
-
-        let board_cards = [board[0], board[1], board[2], board[3], board[4]];
-
-        Ok(equity::omaha::calculate_omaha_leaf_equity(
-            &self.hand_ranks_data,
-            hero_hand,
-            vs_range,
-            &board_cards
-        ))
-    }
-
-    /// Calculate Omaha equity using Monte Carlo simulation on the flop
-    /// hero_hand must be 4, 5, or 6 cards (matching the range)
-    /// flop must be exactly 3 cards
-    /// num_runouts controls accuracy vs speed tradeoff
-    /// IMPORTANT: Call setOmahaRange before using this method
-    #[wasm_bindgen(js_name = omahaMonteCarloFlop)]
-    pub fn omaha_monte_carlo_flop(
-        &self,
-        hero_hand: &[u8],
-        flop: &[u8],
-        num_runouts: usize,
-    ) -> Result<Vec<RunoutEquities>, String> {
-        let vs_range = self.cached_omaha_range.as_ref()
-            .ok_or("No Omaha range set. Call setOmahaRange first.")?;
-
-        if ![4, 5, 6].contains(&hero_hand.len()) {
-            return Err(format!("Hero hand must be 4, 5, or 6 cards, got {}", hero_hand.len()));
-        }
-        if hero_hand.len() != vs_range.hand_size() {
-            return Err(format!(
-                "Hero hand size ({}) must match range hand size ({})",
-                hero_hand.len(),
-                vs_range.hand_size()
-            ));
-        }
-        if flop.len() != 3 {
-            return Err("Flop must be exactly 3 cards".to_string());
-        }
-
-        let flop_cards = [flop[0], flop[1], flop[2]];
-
-        Ok(equity::omaha::calculate_omaha_equity_monte_carlo_flop(
-            &self.hand_ranks_data,
-            hero_hand,
-            vs_range,
-            &flop_cards,
-            num_runouts
-        ))
     }
 }
 

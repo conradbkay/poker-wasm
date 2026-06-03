@@ -8,11 +8,7 @@ The benchmark randomizes the board and both ranges for each trial
 
 ![](assets/lines.svg)
 
-For hand evaluation it's using the twoplustwo algorithm/lookup table, but it only evaluates the union of both ranges (so a max of 1326 evaluations), so even swapping in a 10x slower evaluator wouldn't harm performance much.
-
 ## Usage
-
-### Installing from npm
 
 ```bash
 npm install poker-wasm
@@ -23,16 +19,16 @@ npm install poker-wasm
 Calculate equity for a Hold'em range vs another range:
 
 ```ts
-import * as rvr from "poker-wasm"
+import { EquityCalculator, HoldemRange } from "poker-wasm"
 import fs from "fs"
 
-// Load the hand evaluation data file
+// download from here: https://github.com/chenosaurus/poker-evaluator/blob/master/data/HandRanks.dat
 const handRanksData = fs.readFileSync("./HandRanks.dat")
-const calculator = new rvr.EquityCalculator(handRanksData)
+const calculator = new EquityCalculator(handRanksData)
 
 // Create ranges
-const heroRange = new rvr.HoldemRange()
-const vsRange = new rvr.HoldemRange()
+const heroRange = new HoldemRange()
+const vsRange = new HoldemRange()
 
 // Add hands to ranges (cards are 0-51)
 // For example, AA = [51, 50], KK = [47, 46], etc.
@@ -60,59 +56,44 @@ results.forEach((result) => {
 })
 ```
 
-### Omaha Monte Carlo Flop Equity
+### Omaha (PLO) Range vs Range Equity
 
-Calculate PLO equity using Monte Carlo simulation on the flop:
+Calculate PLO equity for a hero range vs a villain range. The board may be 3, 4,
+or 5 cards; incomplete boards are enumerated. On a flop, passing `maxRunouts`
+samples that many turn/river runouts (Monte Carlo) instead of enumerating all of
+them. Works for PLO4, PLO5, and PLO6 (the range's hand size sets the variant).
 
 ```ts
-import * as rvr from "poker-wasm"
+import { EquityCalculator, OmahaRange } from "poker-wasm"
 import fs from "fs"
 
 // Load the hand evaluation data file
 const handRanksData = fs.readFileSync("./HandRanks.dat")
-const calculator = new rvr.EquityCalculator(handRanksData)
+const calculator = new EquityCalculator(handRanksData)
 
-// Create an Omaha range (4 hole cards per hand)
-const omahaRange = new rvr.OmahaRange()
+// Hero and villain ranges (4-card hands here). Set once to avoid repeat transfers.
+const heroRange = new OmahaRange(4)
+heroRange.addHand(new Uint8Array([35, 34, 31, 30]), 1.0) // TT99
 
-// Add Omaha hands to the range
-omahaRange.addHand(new Uint8Array([51, 50, 47, 46]), 1.0) // AAKK double suited
-omahaRange.addHand(new Uint8Array([43, 42, 39, 38]), 1.0) // QQJJ
+const vsRange = new OmahaRange(4)
+vsRange.addHand(new Uint8Array([51, 50, 47, 46]), 1.0) // AAKK double suited
+vsRange.addHand(new Uint8Array([43, 42, 39, 38]), 1.0) // QQJJ
 
-// Set range once (avoids repeated memory transfers)
-calculator.setOmahaRange(omahaRange)
+calculator.setOmahaHeroRange(heroRange)
+calculator.setOmahaVsRange(vsRange)
 
-// Hero's hand (4 cards)
-const heroHand = new Uint8Array([35, 34, 31, 30]) // TT99
-
-// Flop (3 cards)
 const flop = new Uint8Array([0, 1, 2]) // 2s 2h 2d
 
-// Calculate equity using Monte Carlo with 1000 runouts
-const numRunouts = 1000
-const runoutResults = calculator.omahaMonteCarloFlop(heroHand, flop, numRunouts)
+// Equity for every hero hand vs the villain range, aggregated over runouts.
+// Pass 1000 to Monte Carlo sample the turn/river instead of full enumeration.
+const results = calculator.omahaEquityVsRange(flop, 1000)
 
-// Results contain equity for each sampled runout
-console.log(`Sampled ${runoutResults.length} runouts`)
-runoutResults.slice(0, 10).forEach((result, i) => {
-  console.log(`Runout ${i}: Board [${result.board}]`)
-  console.log(`  Win: ${result.equity.win.toFixed(3)}`)
-  console.log(`  Tie: ${result.equity.tie.toFixed(3)}`)
-  console.log(`  Lose: ${result.equity.lose.toFixed(3)}`)
+results.forEach((result) => {
+  const { hand, equity } = result
+  const total = equity.win + equity.tie + equity.lose
+  console.log(`Hand: [${hand}]`)
+  console.log(`  Win: ${(equity.win / total).toFixed(3)}`)
+  console.log(`  Tie: ${(equity.tie / total).toFixed(3)}`)
+  console.log(`  Lose: ${(equity.lose / total).toFixed(3)}`)
 })
-
-// Calculate average equity across all runouts
-const avgEquity = runoutResults.reduce(
-  (acc, r) => ({
-    win: acc.win + r.equity.win / runoutResults.length,
-    tie: acc.tie + r.equity.tie / runoutResults.length,
-    lose: acc.lose + r.equity.lose / runoutResults.length
-  }),
-  { win: 0, tie: 0, lose: 0 }
-)
-
-console.log("\nAverage Equity:")
-console.log(`  Win: ${avgEquity.win.toFixed(3)}`)
-console.log(`  Tie: ${avgEquity.tie.toFixed(3)}`)
-console.log(`  Lose: ${avgEquity.lose.toFixed(3)}`)
 ```
